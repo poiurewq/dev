@@ -26,7 +26,6 @@ Commands:
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import subprocess
 import sys
@@ -39,7 +38,6 @@ from pathlib import Path
 
 CONFIG_SCHEMA_VERSION = 1
 CANONICAL_REPO = "https://github.com/poiurewq/dev"
-CANONICAL_GIT = "git@github.com:poiurewq/dev.git"
 VERSION_URL = "https://raw.githubusercontent.com/poiurewq/dev/main/VERSION"
 DEFAULT_INTERVAL_HOURS = 24
 CONFIG_DIR = Path.home() / ".config" / "dev-skill"
@@ -127,10 +125,6 @@ def write_config(cfg: dict[str, str]) -> None:
 
 def parse_bool(s: str) -> bool:
     return str(s).strip().lower() in ("1", "true", "yes", "on")
-
-
-def format_bool(b: bool) -> str:
-    return "true" if b else "false"
 
 
 # --- versions ---
@@ -257,8 +251,25 @@ def is_skill_git_root(path: Path) -> bool:
 
 
 def origin_looks_canonical(url: str) -> bool:
-    u = (url or "").strip().lower()
-    return "poiurewq/dev" in u or u.rstrip("/").endswith("/dev.git")
+    """True only for github.com/poiurewq/dev (https/ssh/scp forms, optional .git).
+
+    Rejects substring traps (poiurewq/devtools) and other owners' dev repos.
+    """
+    u = (url or "").strip().lower().rstrip("/")
+    if u.endswith(".git"):
+        u = u[: -len(".git")]
+    # https://token@github.com/... or ssh://git@github.com/...
+    u = re.sub(r"^(https?|ssh)://[^/@]+@", r"\1://", u)
+    # After stripping userinfo, ssh URLs may be ssh://github.com/...
+    if u.startswith("ssh://"):
+        u = u[len("ssh://") :]
+    return u in (
+        "https://github.com/poiurewq/dev",
+        "http://github.com/poiurewq/dev",
+        "git@github.com:poiurewq/dev",
+        "github.com/poiurewq/dev",
+        "github.com:poiurewq/dev",
+    )
 
 
 def git_pull_ff(path: Path) -> tuple[bool, str]:
