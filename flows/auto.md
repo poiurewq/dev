@@ -43,9 +43,9 @@ branch — that is human-only (flows/implement.md local-ahead preflight).
    mechanical or fully pinned down (clear scope, `Decision:` lines already
    present, established patterns to follow). If nothing suitable exists,
    report that and stop — don't force a risky task.
-3. **Claim**: `TASKS update <id> --status doing --assignee auto/<model>
-   --branch <task-branch>`. If the script errors with a rebase conflict,
-   another agent claimed simultaneously — resync and select again.
+3. **Claim**: `TASKS claim <id> --assignee auto/<model>`. If the script
+   errors (e.g. concurrent claim race on board push), resync and select
+   again. Use the printed `workdir`.
 4. **Triage scope** (flows/implement.md step 1, including its
    one-layer-at-a-time rule — mid-sized subtasks are fine): if oversized,
    file the subtasks as proposals instead of adding them live: check `TASKS

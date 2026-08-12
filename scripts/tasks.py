@@ -14,8 +14,8 @@ _dev-board-<scope>), commit there, and push to the integration branch. When
 several product boards share one integration branch, push uses rebase/retry
 (policy A). Code branches never commit to .tasks/.
 
-Stdlib + git for board CRUD. `land` / `cleanup` also call `gh` for the
-post-approval PR merge path (never auto-approve).
+Stdlib + git for board CRUD. Git/gh lifecycle helpers: `claim` (implement
+setup), `land` / `cleanup` (post-approval merge). Never auto-approve reviews.
 """
 import argparse
 import datetime
@@ -617,6 +617,126 @@ def slugify(title):
     s = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
     return s[:40].rstrip("-") or "task"
 
+
+def default_task_branch(scope, tid, title):
+    """Branch name for a task: dev/<id>-<slug> or dev/<scope>-<id>-<slug>."""
+    slug = slugify(title)
+    if scope in (".", ""):
+        return f"dev/{int(tid)}-{slug}"
+    scope_slug = scope.replace("/", "-").replace("\\", "-")
+    return f"dev/{scope_slug}-{int(tid)}-{slug}"
+
+
+def current_branch_name(cwd):
+    r = git("rev-parse", "--abbrev-ref", "HEAD", cwd=cwd, check=False)
+    if r.returncode != 0:
+        return ""
+    return (r.stdout or "").strip()
+
+
+def task_worktree_path(root, scope, tid, title):
+    """Canonical path for a task worktree under product .dev/worktrees/."""
+    name = f"{int(tid)}-{slugify(title)}"
+    return os.path.join(product_root(root, scope), ".dev", "worktrees", name)
+
+
+def ensure_task_branch(root, branch, start_ref):
+    """Create local task branch from start_ref if missing; no checkout."""
+    if ref_exists(root, f"refs/heads/{branch}"):
+        return
+    if ref_exists(root, f"origin/{branch}"):
+        git("branch", "--track", branch, f"origin/{branch}", cwd=root,
+            check=False)
+        if ref_exists(root, f"refs/heads/{branch}"):
+            return
+        git("branch", branch, f"origin/{branch}", cwd=root)
+        return
+    if not ref_exists(root, start_ref):
+        sys.exit(f"error: start ref '{start_ref}' not found; fetch origin first")
+    git("branch", branch, start_ref, cwd=root)
+
+
+def free_task_branch_from_primary(root, branch, integration):
+    """If primary has `branch` checked out, move it to integration (hub).
+
+    Required before `git worktree add` can attach the same branch elsewhere.
+    Refuses when primary is dirty so we never discard uncommitted work.
+    """
+    checkout = branch_checkout_cwd(root, branch)
+    if not checkout:
+        return
+    if os.path.realpath(checkout) != os.path.realpath(root):
+        return  # already on a linked worktree — caller reuses it
+    if worktree_is_dirty(root):
+        sys.exit(f"error: primary clone is on task branch '{branch}' and dirty; "
+                 f"commit/stash or move primary to '{integration}' before claim")
+    r = git("checkout", integration, cwd=root, check=False)
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "").strip()
+        sys.exit(f"error: could not move primary to '{integration}' to free "
+                 f"'{branch}' for a task worktree:\n{err}")
+
+
+def ensure_task_worktree(root, scope, tid, title, branch):
+    """Create or reuse the canonical linked worktree for this task branch."""
+    wt_path = task_worktree_path(root, scope, tid, title)
+    os.makedirs(os.path.dirname(wt_path), exist_ok=True)
+    if os.path.exists(wt_path):
+        if os.path.exists(os.path.join(wt_path, ".git")):
+            git("worktree", "prune", cwd=root, check=False)
+            cur = current_branch_name(wt_path)
+            if cur == branch:
+                return wt_path
+            sys.exit(f"error: path exists but is not a live worktree for "
+                     f"'{branch}': {wt_path}")
+        sys.exit(f"error: task worktree path exists without .git "
+                 f"(remove by hand): {wt_path}")
+    r = git("worktree", "add", wt_path, branch, cwd=root, check=False)
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "").strip()
+        sys.exit(f"error: git worktree add failed for '{branch}':\n{err}")
+    return wt_path
+
+
+def resolve_task_ready_path(root, scope, tid, title, branch, integration):
+    """Return the path where the agent should work — always a linked worktree.
+
+    Policy: task implement work lives under `<scope>/.dev/worktrees/`; the
+    primary clone stays on integration as a hub for parallel agents. Never
+    checks out the task branch on primary. Idempotent resume reuses an
+    existing task worktree for this id/branch.
+    """
+    root_rp = os.path.realpath(root)
+
+    # Resume: existing linked worktree for this task (never primary).
+    for path in find_task_worktree_paths(root, scope, tid, branch):
+        if os.path.realpath(path) == root_rp:
+            continue
+        if not os.path.isdir(path):
+            continue
+        if not os.path.exists(os.path.join(path, ".git")):
+            continue
+        cur = current_branch_name(path)
+        if cur != branch:
+            if worktree_is_dirty(path):
+                sys.exit(f"error: task worktree {path} is dirty and not on "
+                         f"'{branch}' (on '{cur}'); commit/stash or remove it")
+            r = git("checkout", branch, cwd=path, check=False)
+            if r.returncode != 0:
+                err = (r.stderr or r.stdout or "").strip()
+                sys.exit(f"error: could not checkout '{branch}' in "
+                         f"{path}:\n{err}")
+        return path
+
+    # Branch already on a non-primary worktree (odd path / renamed title).
+    checkout = branch_checkout_cwd(root, branch)
+    if checkout and os.path.realpath(checkout) != root_rp:
+        return checkout
+
+    # Free the branch if a prior claim left it on primary, then always add
+    # a linked worktree under .dev/worktrees/.
+    free_task_branch_from_primary(root, branch, integration)
+    return ensure_task_worktree(root, scope, tid, title, branch)
 
 
 # ---------- land / cleanup (task PR merge path) ----------
@@ -1332,6 +1452,90 @@ def cmd_land(args):
     print(f"T{tid}: landed and done")
 
 
+# ---------- claim (implement setup) ----------
+
+def identity_or_exit(root, scope):
+    ident = read_local(root, scope, "identity")
+    if not ident:
+        id_path = os.path.join(product_root(root, scope), ".dev", "identity")
+        sys.exit(f"error: no identity set for this product ({id_path}). "
+                 "Run: init --name <handle> (or pass --assignee)")
+    return ident
+
+
+def cmd_claim(args):
+    """Implement claim/setup: branch from origin/integration, always a
+    linked worktree under .dev/worktrees (primary stays on integration as
+    hub), record branch + doing + assignee. Idempotent resume.
+    """
+    root, scope, integration, bw = ctx()
+    meta = find_task(bw, scope, args.id)
+    tid = meta["id"]
+    status = meta["status"]
+
+    if status in ("done", "not-planned"):
+        sys.exit(f"error: T{tid} is {status}; cannot claim")
+    if status == "proposed":
+        sys.exit(f"error: T{tid} is proposed; approve via review before claim")
+    if status == "review":
+        sys.exit(f"error: T{tid} is in review; do not re-claim — resume on "
+                 f"the existing branch/PR (address review comments there), "
+                 f"or land/cleanup first")
+    if (meta.get("needs") or "").strip() == "decision":
+        sys.exit(f"error: T{tid} has needs: decision; resolve before claim")
+
+    assignee = (args.assignee if args.assignee is not None else "").strip()
+    if not assignee:
+        assignee = identity_or_exit(root, scope)
+
+    branch = (args.branch or "").strip() or (meta.get("branch") or "").strip()
+    if not branch:
+        branch = default_task_branch(scope, tid, meta["title"])
+
+    undone = [d for d in meta.get("deps", [])
+              if find_task(bw, scope, d)["status"] != "done"]
+    if undone:
+        print(f"warning: T{tid} has unfinished deps: {undone}", file=sys.stderr)
+
+    if not has_remote(root):
+        sys.exit("error: no origin remote; cannot claim from origin/integration")
+    git("fetch", "origin", integration, cwd=root, check=False)
+    start = f"origin/{integration}"
+    if not ref_exists(root, start):
+        sys.exit(f"error: {start} missing after fetch")
+
+    ensure_task_branch(root, branch, start)
+    ready = resolve_task_ready_path(
+        root, scope, tid, meta["title"], branch, integration)
+
+    # Refresh meta after git work (board may have moved on shared integration).
+    integration, bw = resolve_board(root, scope)
+    meta = find_task(bw, scope, tid)
+    changes = []
+    if meta["status"] != "doing":
+        meta["status"] = "doing"
+        changes.append("status=doing")
+    if meta.get("assignee") != assignee:
+        meta["assignee"] = assignee
+        changes.append(f"assignee={assignee}")
+    if meta.get("branch") != branch:
+        meta["branch"] = branch
+        changes.append(f"branch={branch}")
+    if changes:
+        with open(meta["path"], "w") as f:
+            f.write(render_task(meta))
+        board_commit(root, integration, bw, scope,
+                     f"dev: update T{tid} ({', '.join(changes)})")
+        print(f"T{tid} updated: {', '.join(changes)}")
+    else:
+        print(f"T{tid}: already claimed (doing, {assignee}, {branch})")
+
+    print(f"T{tid}: ready")
+    print(f"  branch:  {branch}")
+    print(f"  workdir: {ready}")
+    print(f"  base:    origin/{integration}")
+
+
 # ---------- commands ----------
 
 def cmd_init(args):
@@ -1846,6 +2050,15 @@ def main():
     s.add_argument("--parent")
     s.add_argument("--name", help="iteration name (default: branch name)")
     s.set_defaults(fn=cmd_iteration_new)
+
+    s = sub.add_parser("claim",
+                       help="implement setup: branch + linked worktree, status=doing")
+    s.add_argument("id", type=int)
+    s.add_argument("--assignee",
+                   help="assignee (default: product identity; auto agents pass auto/<model>)")
+    s.add_argument("--branch",
+                   help="task branch (default: recorded or dev/<scope?>-<id>-<slug>)")
+    s.set_defaults(fn=cmd_claim)
 
     s = sub.add_parser("land",
                        help="merge task PR (squash), cleanup branches/worktree, mark done")

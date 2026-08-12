@@ -53,6 +53,12 @@ TASKS board [--expand]                  # collapse umbrella children by default
 TASKS iteration
 TASKS iteration-close [--force]
 TASKS iteration-new <branch> [--parent <branch>] [--name <name>]
+TASKS claim <id> [--assignee <who>] [--branch <b>]
+                                        # implement setup: branch from
+                                        # origin/integration, always linked
+                                        # worktree under .dev/worktrees
+                                        # (primary stays hub), status=doing;
+                                        # prints workdir
 TASKS land <id>                         # post-approval: merge, cleanup, done
 TASKS cleanup <id>                      # worktree + branch prune (branch only if PR MERGED)
 ```
@@ -64,8 +70,8 @@ clears a field. Multi-word values need quoting. `--area` accepts a
 comma-separated list (`--area "cli, docs"`); `all` is reserved (see Area
 stewardship). Board discovery: nearest board at or above cwd, or `--scope`;
 if none, error listing known boards (cd in, or pass `--scope`). No
-single-board fallback. **`land` / `cleanup` errors:** when either command
-exits non-zero or prints `error: …`, surface that output to the user
+single-board fallback. **`claim` / `land` / `cleanup` errors:** when any
+command exits non-zero or prints `error: …`, surface that output to the user
 verbatim and stop — do not hide, paraphrase away, or paper over with
 manual git/gh.
 

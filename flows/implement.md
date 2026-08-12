@@ -101,18 +101,19 @@ single id. `/dev auto` stays one task per cycle.
      start on the first subtask if the user says so. (Auto mode files the
      subtasks as `proposed` instead — flows/auto.md.)
 
-2. **Claim**: `TASKS update <id> --status doing --assignee <me> --branch
-   dev/<id>-<slug>` (slug: kebab-case from the settled title; scoped boards
-   prefix the scope with `/`→`-`, e.g. `dev/internal-dev-3-<slug>`). Heed
-   the blocked-deps warning: stop and tell the user unless told otherwise.
+2. **Claim**: `TASKS claim <id>` (optional `--assignee`, `--branch`). The
+   script creates the task branch from `origin/<integration>`, **always** adds
+   a linked worktree under `<scope>/.dev/worktrees/` (primary stays on
+   integration as the hub — never checks out the task branch on primary),
+   records `status=doing` + assignee + branch, and prints `workdir` — work
+   there. Idempotent if branch/worktree already exist. Heed unfinished-deps
+   warnings: stop and tell the user unless told otherwise.
    (Multi-task batch: within-set unfinished deps — see
-   `flows/implement-batch.md`.)
+   `flows/implement-batch.md`.) Do **not** hand-roll `git branch` /
+   `git worktree add` / board `update` for claim.
 
-3. **Branch**: create the branch from `origin/<integration>` (already
-   fetched in preflight). If the current worktree has unrelated uncommitted
-   work or sits on another task's branch, don't disturb it — `git worktree
-   add <scope>/.dev/worktrees/<id>-<slug> <branch>` (root board: `.dev/worktrees/…`)
-   and work there.
+3. **Branch**: already done by `claim` (step 2). Confirm you are in the
+   printed `workdir` (the task worktree) on the task branch before editing.
 
 4. **Implement.** Match existing conventions. **Design forks — surface,
    don't decide**: where the task is silent on a choice that repo
