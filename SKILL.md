@@ -30,8 +30,9 @@ TASKS init --name <handle> [--scope <subdir>] [--integration <branch>]
 TASKS whoami                            # this checkout's identity (exits
                                         # nonzero if not set)
 TASKS config [<key> [<value>]]          # settable: integrator, parent_branch,
-                                        # iteration (rename; literal, and
-                                        # refused once closed-not-landed)
+                                        # iteration (rename; date-prefix like
+                                        # init, keeping current date; refused
+                                        # once closed-not-landed)
 TASKS area list
 TASKS area set <name> [--desc "<one-line scope>"]
 TASKS area rm <name> [--force]
@@ -62,7 +63,8 @@ TASKS claim <id> [--assignee <who>] [--branch <b>]
                                         # branch from origin/integration,
                                         # always a linked worktree under
                                         # .dev/worktrees (primary stays hub),
-                                        # status=doing; prints workdir
+                                        # status=doing; prints workdir +
+                                        # product (edit in product)
 TASKS ship <id> --shipped "<what actually shipped>"
                 [--message M] [--title T] [--body B]
                 [--version-intent <intent>] [--base <branch>]
@@ -163,7 +165,7 @@ away, or paper over it with manual git/gh.
   `areas.md` (area names + one-line scopes), `log.md` (past-iteration
   index), `archive/<iteration>/NNN.md` (every closed task, verbatim — the
   full record the log only indexes). Iteration names are stored as
-  `<YYYY-MM-DD>-<name>` (start date, applied at `init`/`iteration-new`), so
+  `<YYYY-MM-DD>-<name>` (start date, applied at every setter), so
   archive dirs and log sections stay in the order they happened. Missing
   `schema_version` means 0; see product `AGENTS.md` for compatibility rules
   when changing board schema.

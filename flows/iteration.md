@@ -5,9 +5,11 @@ iteration; cross-iteration references are `<iteration>/T<id>` (log.md lines
 are already written that way). Boards whose integration branch is `main` with
 no parent simply never close — fine for simple repos.
 
-**Names carry their start date.** `init` and `iteration-new` store the
-iteration as `<YYYY-MM-DD>-<name>`, prefixing whatever was passed (or the
-branch name) unless it already starts with an ISO date. That is what makes
+**Names carry their start date.** Every setter stores `<YYYY-MM-DD>-<name>`.
+`init` / `iteration-new` prefix today (or the branch name) unless the value
+already starts with an ISO date; `config iteration` keeps the current start
+date on rename, or prefixes today if the current name is undated. A value
+that already starts with an ISO date is stored as-is. That is what makes
 archive dirs and log.md sections reconstruct the order the project was built
 in — don't strip the date when referring to an iteration.
 
@@ -15,8 +17,8 @@ in — don't strip the date when referring to an iteration.
 
 `TASKS iteration`: scope, name, branch, parent, done/total.
 
-To rename the current iteration: `TASKS config iteration <new-name>` (stored
-literally — add your own date prefix). Refused once the iteration is closed
+To rename the current iteration: `TASKS config iteration <new-name>` (same
+normalization as above). Refused once the iteration is closed
 but not yet landed, since the land gate matches log.md's close heading.
 
 ## `/dev iteration close`

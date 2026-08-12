@@ -629,7 +629,9 @@ def normalize_iteration_name(name, today=None):
     Archive dirs and log.md sections are otherwise an unordered set of slugs,
     so the order a project was built in is unreconstructable. Idempotent: a
     name that already starts with an ISO date is left alone, so re-running
-    init on an existing board never double-prefixes.
+    init on an existing board never double-prefixes. ``today`` is the date
+    to attach when the name is undated — callers pass the current start
+    date on rename, or omit it to stamp today (creation / undated current).
     """
     name = (name or "").strip()
     today = today or datetime.date.today().isoformat()
@@ -1574,6 +1576,7 @@ def cmd_claim(args):
     print(f"T{tid}: ready")
     print(f"  branch:  {branch}")
     print(f"  workdir: {ready}")
+    print(f"  product: {product_root(ready, scope)}")
     print(f"  base:    origin/{integration}")
 
 
@@ -2668,11 +2671,12 @@ def cmd_config(args):
         if args.key not in SETTABLE_KEYS:
             sys.exit(f"error: '{args.key}' is not settable via config "
                      f"(settable: {', '.join(SETTABLE_KEYS)})")
+        value = args.value
         if args.key == "iteration":
             # "" clears a field on update, so it is a plausible typo here; an
             # empty iteration would archive to a "task" slug and write a
             # headless log heading.
-            if not args.value.strip():
+            if not value.strip():
                 sys.exit("error: iteration name cannot be empty")
             cur = cfg.get("iteration", branch)
             # iteration_close_ready matches log.md's "## <name> — closed …"
@@ -2684,14 +2688,20 @@ def cmd_config(args):
                          f"{tdir(scope)}/log.md; renaming it now would break "
                          "iteration-land. Land it, then start the next one "
                          "with iteration-new.")
-            taken = archive_taken(bw, scope, args.value)
+            # Same normalizer as init / iteration-new. Rename keeps the
+            # current start date; today is only for creation, or when the
+            # current name is undated.
+            kept = ISO_DATE_PREFIX.match(cur or "")
+            value = normalize_iteration_name(
+                value, today=kept.group(1) if kept else None)
+            taken = archive_taken(bw, scope, value)
             if taken:
-                sys.exit(f"error: iteration name {args.value!r} already has an "
+                sys.exit(f"error: iteration name {value!r} already has an "
                          f"archive at {taken}/; pick another name.")
-        cfg[args.key] = args.value
+        cfg[args.key] = value
         write_board_cfg(bw, scope, cfg)
-        board_commit(root, branch, bw, scope, f"dev: config {args.key}={args.value}")
-        print(f"{args.key}: {args.value}")
+        board_commit(root, branch, bw, scope, f"dev: config {args.key}={value}")
+        print(f"{args.key}: {value}")
 
 
 def cmd_area(args):

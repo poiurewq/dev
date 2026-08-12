@@ -84,14 +84,16 @@ single id. `/dev auto` stays one task per cycle.
      instead — flows/auto.md.)
 
 2. **Claim**: `TASKS claim <id>` (optional `--assignee`, `--branch`), which
-   owns the whole branch/worktree/board setup and prints the `workdir` to
-   work in. Idempotent if branch and worktree already exist. Heed
-   unfinished-deps warnings: stop and tell the user unless told otherwise.
-   (Multi-task batch: within-set deps — see `flows/implement-batch.md`.) Do
-   **not** hand-roll `git branch` / `git worktree add` / board `update`.
+   owns the whole branch/worktree/board setup and prints `workdir` (git
+   worktree root) and `product` (where to edit — same as workdir on a root
+   board, `<workdir>/<scope>` on a scoped board). Idempotent if branch and
+   worktree already exist. Heed unfinished-deps warnings: stop and tell the
+   user unless told otherwise. (Multi-task batch: within-set deps — see
+   `flows/implement-batch.md`.) Do **not** hand-roll `git branch` /
+   `git worktree add` / board `update`.
 
 3. **Branch**: already done by `claim`. Confirm you are in the printed
-   `workdir` on the task branch before editing.
+   `product` dir on the task branch before editing.
 
 4. **Implement.** Match existing conventions. **Design forks — surface,
    don't decide**: where the task is silent on a choice that repo conventions
@@ -121,7 +123,7 @@ single id. `/dev auto` stays one task per cycle.
    review tool exists in this environment, use it.
 
 6. **Ship**: `TASKS ship <id> --shipped "<what actually shipped>"` from the
-   claim workdir (optional `--message`, `--title`, `--body`,
+   printed `product` dir (optional `--message`, `--title`, `--body`,
    `--version-intent`, `--base <parent-branch>` when stacking). It owns
    commit/push/PR-create and the move to `status=review`; idempotent if the
    PR is already open, and errors on an empty ship. Do **not** hand-roll any
