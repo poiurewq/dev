@@ -44,7 +44,7 @@ TASKS_DIR = ".tasks"
 SCHEMA_VERSION = 1
 CONFIG_KEYS = ["schema_version", "integration_branch", "parent_branch",
                "iteration", "integrator", "contributors"]
-SETTABLE_KEYS = ["parent_branch", "integrator"]
+SETTABLE_KEYS = ["parent_branch", "integrator", "iteration"]
 # kind: optional. "" = normal task; "umbrella" = goal parent whose deps are
 # direct children (leaves or nested umbrellas). Hierarchy lives in deps;
 # reverse index is computed at board time. Other kind values reserved for
@@ -618,6 +618,40 @@ def append_body(body, text):
 def slugify(title):
     s = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
     return s[:40].rstrip("-") or "task"
+
+
+ISO_DATE_PREFIX = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:\b|_)")
+
+
+def normalize_iteration_name(name, today=None):
+    """Iteration names carry their start date: <YYYY-MM-DD>-<name>.
+
+    Archive dirs and log.md sections are otherwise an unordered set of slugs,
+    so the order a project was built in is unreconstructable. Idempotent: a
+    name that already starts with an ISO date is left alone, so re-running
+    init on an existing board never double-prefixes.
+    """
+    name = (name or "").strip()
+    today = today or datetime.date.today().isoformat()
+    if not name:
+        return today
+    if ISO_DATE_PREFIX.match(name):
+        return name
+    return f"{today}-{name}"
+
+
+def iteration_slug(name):
+    """Directory-safe form of an iteration name, keeping any date prefix.
+
+    slugify truncates at 40 chars; applying it to the whole dated name would
+    spend 11 of those on the date and make long names collide on their
+    prefix. Slug the remainder, then re-attach the date.
+    """
+    m = ISO_DATE_PREFIX.match(name or "")
+    if not m:
+        return slugify(name)
+    rest = name[m.end():].strip("-_ ")
+    return f"{m.group(1)}-{slugify(rest)}" if rest else m.group(1)
 
 
 def default_task_branch(scope, tid, title):
@@ -1668,6 +1702,39 @@ def ensure_dev_batch_in_text(text, ids):
     return text.rstrip() + ("\n\n" if text.strip() else "") + line + "\n"
 
 
+# ---------- shipped-state record ----------
+
+# One record per ship, as its own paragraph in the task body:
+#   Shipped (2026-08-12): what actually landed, not what was planned.
+SHIPPED_RE = re.compile(
+    r"(?ims)^Shipped \(\d{4}-\d{2}-\d{2}\):.*?(?=\n[ \t]*\n|\Z)")
+
+
+def format_shipped(text, date=None):
+    """One shipped record. Collapsed to a single paragraph so it parses back."""
+    text = " ".join((text or "").split())
+    date = date or datetime.date.today().isoformat()
+    return f"Shipped ({date}): {text}"
+
+
+def collect_shipped(text):
+    """Every shipped record in a task or PR body, in order."""
+    return [m.group(0).strip() for m in SHIPPED_RE.finditer(text or "")]
+
+
+def ensure_shipped_in_text(text, records):
+    """Replace the shipped records in text with `records`, appended at the end.
+
+    Marker-free and idempotent like ensure_dev_batch_in_text: re-shipping
+    rewrites the block rather than stacking duplicates onto the PR body.
+    """
+    text = re.sub(r"\n{3,}", "\n\n", SHIPPED_RE.sub("", text or "")).strip()
+    if not records:
+        return text + "\n" if text else ""
+    block = "\n\n".join(records)
+    return (text + "\n\n" + block if text else block) + "\n"
+
+
 def pr_is_open(info):
     if not info:
         return False
@@ -2029,6 +2096,17 @@ def cmd_ship(args):
     if meta["status"] in ("done", "not-planned", "proposed"):
         sys.exit(f"error: T{tid} is {meta['status']}; cannot ship")
 
+    # A ship without a result record is what leaves the PR body a stale copy
+    # of pre-implementation intent. Required on every ship, including re-ship
+    # after changes-requested — that is when the record drifts most.
+    shipped = (args.shipped or "").strip()
+    if not shipped:
+        sys.exit(f"error: T{tid} needs --shipped \"<what actually shipped>\"; "
+                 "one or two sentences on the result, not the plan "
+                 "(re-ship: what changed since the last ship)")
+    shipped_line = format_shipped(shipped)
+    shipped_records = collect_shipped(meta.get("body") or "") + [shipped_line]
+
     require_gh(root)
     if not has_remote(root):
         sys.exit("error: no origin remote; cannot ship")
@@ -2111,6 +2189,7 @@ def cmd_ship(args):
             body = body.rstrip() + f"\n\nVersion intent: {intent}\n"
         if batch_line:
             body = ensure_dev_batch_in_text(body, batch_ids)
+        body = ensure_shipped_in_text(body, shipped_records)
         r = gh("pr", "create", "--base", pr_base, "--head", branch,
                "--title", title, "--body", body, cwd=root, check=False)
         if r.returncode != 0:
@@ -2124,20 +2203,24 @@ def cmd_ship(args):
             print(f"  opened PR: {pr_url}")
     else:
         print(f"  PR: {pr_url}")
-        # Ensure Dev-batch stamp on an existing open PR when --batch given.
-        if batch_ids:
-            info = pr_view(root, pr_url, soft=True) or {}
-            body = info.get("body") or ""
-            if parse_dev_batch(body) != batch_ids:
-                new_body = ensure_dev_batch_in_text(body, batch_ids)
-                r = gh("pr", "edit", pr_url, "--body", new_body, cwd=root,
-                       check=False)
-                if r.returncode != 0:
-                    err = (r.stderr or r.stdout or "").strip()
-                    print(f"  warning: could not stamp Dev-batch on PR: {err}",
-                          file=sys.stderr)
-                else:
-                    print(f"  stamped PR: {format_dev_batch(batch_ids)}")
+        # Re-ship: refresh the shipped records on the open PR (and the
+        # Dev-batch stamp when --batch given). The task body is the source of
+        # truth; a failed edit only costs the mirror, so it warns.
+        info = pr_view(root, pr_url, soft=True) or {}
+        body = info.get("body") or ""
+        new_body = body
+        if batch_ids and parse_dev_batch(new_body) != batch_ids:
+            new_body = ensure_dev_batch_in_text(new_body, batch_ids)
+        new_body = ensure_shipped_in_text(new_body, shipped_records)
+        if new_body.strip() != body.strip():
+            r = gh("pr", "edit", pr_url, "--body", new_body, cwd=root,
+                   check=False)
+            if r.returncode != 0:
+                err = (r.stderr or r.stdout or "").strip()
+                print(f"  warning: could not update PR body: {err}",
+                      file=sys.stderr)
+            else:
+                print(f"  updated PR body: {shipped_line}")
 
     integration, bw = resolve_board(root, scope)
     meta = find_task(bw, scope, tid)
@@ -2152,6 +2235,8 @@ def cmd_ship(args):
         meta["body"] = ensure_dev_batch_in_text(meta.get("body") or "",
                                                batch_ids)
         changes.append("batch-stamp")
+    meta["body"] = append_body(meta.get("body") or "", shipped_line)
+    changes.append("shipped")
     if changes:
         with open(meta["path"], "w") as f:
             f.write(render_task(meta))
@@ -2526,7 +2611,7 @@ def cmd_init(args):
         os.makedirs(os.path.join(bw, tdir(scope)), exist_ok=True)
         cfg = {"schema_version": str(SCHEMA_VERSION),
                "integration_branch": branch, "parent_branch": args.parent or "",
-               "iteration": args.iteration or branch,
+               "iteration": normalize_iteration_name(args.iteration or branch),
                "integrator": args.name, "contributors": args.name}
         write_board_cfg(bw, scope, cfg)
         gi = os.path.join(bw, ".gitignore")
@@ -2583,6 +2668,26 @@ def cmd_config(args):
         if args.key not in SETTABLE_KEYS:
             sys.exit(f"error: '{args.key}' is not settable via config "
                      f"(settable: {', '.join(SETTABLE_KEYS)})")
+        if args.key == "iteration":
+            # "" clears a field on update, so it is a plausible typo here; an
+            # empty iteration would archive to a "task" slug and write a
+            # headless log heading.
+            if not args.value.strip():
+                sys.exit("error: iteration name cannot be empty")
+            cur = cfg.get("iteration", branch)
+            # iteration_close_ready matches log.md's "## <name> — closed …"
+            # heading, so renaming a closed-but-unlanded iteration would break
+            # the land gate. Refuse exactly then — while tasks are still live
+            # (including the close-time collision case) renaming is safe.
+            if iteration_close_ready(bw, scope, cur) is None:
+                sys.exit(f"error: iteration {cur!r} is already closed in "
+                         f"{tdir(scope)}/log.md; renaming it now would break "
+                         "iteration-land. Land it, then start the next one "
+                         "with iteration-new.")
+            taken = archive_taken(bw, scope, args.value)
+            if taken:
+                sys.exit(f"error: iteration name {args.value!r} already has an "
+                         f"archive at {taken}/; pick another name.")
         cfg[args.key] = args.value
         write_board_cfg(bw, scope, cfg)
         board_commit(root, branch, bw, scope, f"dev: config {args.key}={args.value}")
@@ -2894,10 +2999,34 @@ def cmd_iteration(args):
     print(f"tasks: {done}/{len(tasks)} done")
 
 
+def archive_dir(scope, iteration_name):
+    """Where a closed iteration's task files are kept, relative to repo root.
+
+    A subdirectory of the board dir, so it lands with the board and survives
+    into later iterations; task_glob only matches NNN.md at the board root,
+    so archived files are never live tasks.
+    """
+    return os.path.join(tdir(scope), "archive", iteration_slug(iteration_name))
+
+
+def archive_taken(bw, scope, iteration_name):
+    """Relative archive dir if it already holds a closed iteration, else None.
+
+    Ids restart each iteration, so archiving onto an existing directory would
+    overwrite another iteration's tasks. Checked at naming time (iteration-new,
+    config iteration), where picking another name is free, and again at close
+    as a last resort.
+    """
+    rel = archive_dir(scope, iteration_name)
+    d = os.path.join(bw, rel)
+    return rel if os.path.isdir(d) and os.listdir(d) else None
+
+
 def cmd_iteration_close(args):
-    """Log tasks to .tasks/log.md and delete task files, committing on the
-    integration branch. Landing the integration branch in the parent (via PR)
-    happens afterwards and is not this script's job."""
+    """Archive task files under .tasks/archive/<iteration>/, index them in
+    .tasks/log.md, and remove the live files, committing on the integration
+    branch. Landing the integration branch in the parent (via PR) happens
+    afterwards and is not this script's job."""
     root, scope, branch, bw = ctx()
     cfg = read_board_cfg(bw, scope)
     tasks = all_tasks(bw, scope)
@@ -2912,27 +3041,50 @@ def cmd_iteration_close(args):
     name = cfg.get("iteration", branch)
     today = datetime.date.today().isoformat()
     parent = cfg.get("parent_branch", "")
+    arel = archive_dir(scope, name)
+    adir = os.path.join(bw, arel)
+    # Normally caught at naming time; reachable only if the archive appeared
+    # after this iteration was named (a merge from the parent, say). Fail
+    # closed — the whole point of the archive is that nothing is lost.
+    if archive_taken(bw, scope, name):
+        sys.exit(f"error: iteration name {name!r} already has an archive at "
+                 f"{arel}/; closing would overwrite it. Rename this iteration "
+                 f"first: TASKS config iteration <new-name>")
+    os.makedirs(adir, exist_ok=True)
     header = f"## {name} — closed {today} (branch {branch}"
     header += f" → {parent})" if parent else ")"
-    entry = [header]
+    entry = [header, f"archive: {arel}/"]
     for t in tasks:
         line = f"- {name}/T{t['id']} {t['title']}"
         if t.get("assignee"):
             line += f" — {t['assignee']}"
+        if t.get("area"):
+            line += f" [{t['area']}]"
         if t["status"] == "not-planned":
             line += " [not planned]"
         elif t["status"] != "done":
             line += f" [unfinished: {t['status']}]"
+        if t.get("pr"):
+            line += f" {t['pr']}"
         entry.append(line)
+        # The log is the index; the archived file next to it holds everything.
+        # Shipped records ride along here so the result is visible at a skim.
+        for rec in collect_shipped(t.get("body") or ""):
+            entry.append("  - " + " ".join(rec.split()))
     log = os.path.join(bw, tdir(scope), "log.md")
     existing = open(log).read() if os.path.exists(log) else "# Iteration log\n"
     with open(log, "w") as f:
         f.write(existing.rstrip() + "\n\n" + "\n".join(entry) + "\n")
     for t in tasks:
+        # Copy verbatim, then remove: frontmatter (area, deps, pr, created)
+        # and the full body — Decision:, Shipped:, not-planned reason — are
+        # preserved exactly, with no parse/render round-trip to lose them.
+        shutil.copyfile(t["path"],
+                        os.path.join(adir, os.path.basename(t["path"])))
         os.remove(t["path"])
     board_commit(root, branch, bw, scope, f"dev: close iteration {name}")
-    print(f"iteration '{name}' closed: {len(tasks)} tasks logged to "
-          f"{tdir(scope)}/log.md and removed")
+    print(f"iteration '{name}' closed: {len(tasks)} tasks archived to "
+          f"{arel}/ and indexed in {tdir(scope)}/log.md")
     if parent:
         print(f"next: TASKS iteration-land  # merge-commit PR into '{parent}'")
         print(f"      then after merge: TASKS iteration-new <branch>")
@@ -2947,10 +3099,27 @@ def cmd_iteration_new(args):
     if args.branch in (old_branch, parent):
         sys.exit(f"error: new iteration branch must differ from '{old_branch}' "
                  f"and parent '{parent}'")
-    git("fetch", "origin", parent, cwd=bw, check=False)
+    git("fetch", "origin", parent, old_branch, cwd=bw, check=False)
     start = f"origin/{parent}" if ref_exists(root, f"origin/{parent}") else parent
     if not ref_exists(root, start):
         sys.exit(f"error: parent branch '{parent}' not found locally or on origin")
+    # The new board starts from the parent, so anything still sitting on the
+    # outgoing branch is invisible to it: its archive dir (missed by the
+    # collision check below) and its log.md close section (which the new
+    # iteration would then re-append around, conflicting at land). Same
+    # predicate iteration-land uses for "already landed" — ancestry, not PR
+    # state. Fail closed: land first, then start the next iteration.
+    old_ref = (f"origin/{old_branch}" if ref_exists(root, f"origin/{old_branch}")
+               else old_branch)
+    if not ref_exists(root, old_ref):
+        sys.exit(f"error: current integration branch '{old_branch}' not found "
+                 "locally or on origin")
+    landed = git("merge-base", "--is-ancestor", old_ref, start,
+                 cwd=root, check=False)
+    if landed.returncode != 0:
+        sys.exit(f"error: '{old_branch}' is not yet contained in '{parent}'; "
+                 "its archive and log.md close section would be missing from "
+                 "the new board. Close and land first: TASKS iteration-land")
     git("reset", "--hard", start, cwd=bw)
     # defensively clear any task files inherited from the parent
     for p in task_glob(bw, scope):
@@ -2958,7 +3127,17 @@ def cmd_iteration_new(args):
     os.makedirs(os.path.join(bw, tdir(scope)), exist_ok=True)
     cfg["integration_branch"] = args.branch
     cfg["parent_branch"] = parent
-    cfg["iteration"] = args.name or args.branch
+    name = normalize_iteration_name(args.name or args.branch)
+    # The gate above makes the parent carry every closed iteration's archive,
+    # so this is the moment a collision is both visible and free to fix — pick
+    # another name rather than discovering it at close, with a board full of
+    # tasks.
+    taken = archive_taken(bw, scope, name)
+    if taken:
+        sys.exit(f"error: iteration name {name!r} already has an archive at "
+                 f"{taken}/; closing it later would overwrite that iteration. "
+                 "Pick another name: iteration-new <branch> --name <name>")
+    cfg["iteration"] = name
     write_board_cfg(bw, scope, cfg)
     write_cache(root, scope, args.branch)
     board_commit(root, args.branch, bw, scope,
@@ -2988,7 +3167,9 @@ def main():
                    "to create/join; default: nearest board at/above cwd, else root")
     s.add_argument("--integration", help="integration branch (default: existing board's, else current)")
     s.add_argument("--parent", help="parent branch this integration branch lands in")
-    s.add_argument("--iteration", help="iteration name (default: branch name)")
+    s.add_argument("--iteration",
+                   help="iteration name (default: branch name); stored with a "
+                        "<YYYY-MM-DD>- start-date prefix unless it has one")
     s.set_defaults(fn=cmd_init)
 
     s = sub.add_parser("whoami", help="print this checkout's identity")
@@ -3071,7 +3252,9 @@ def main():
     s = sub.add_parser("iteration-new", help="start a fresh board on a new integration branch")
     s.add_argument("branch")
     s.add_argument("--parent")
-    s.add_argument("--name", help="iteration name (default: branch name)")
+    s.add_argument("--name",
+                   help="iteration name (default: branch name); stored with a "
+                        "<YYYY-MM-DD>- start-date prefix unless it has one")
     s.set_defaults(fn=cmd_iteration_new)
 
     s = sub.add_parser("iteration-land",
@@ -3110,6 +3293,11 @@ def main():
     s.add_argument("--batch",
                    help="implement-batch stamp: comma-separated task ids "
                         "(writes Dev-batch: … on PR body + task body)")
+    s.add_argument("--shipped",
+                   help="REQUIRED: what actually shipped, in one or two "
+                        "sentences (the result, not the plan). Appended to "
+                        "the task body as 'Shipped (<date>): …' and mirrored "
+                        "onto the PR body on create and every re-ship")
     s.set_defaults(fn=cmd_ship)
 
     s = sub.add_parser("batch-gate",

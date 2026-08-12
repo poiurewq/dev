@@ -120,11 +120,21 @@ single id. `/dev auto` stays one task per cycle.
    leftover debug code, convention drift. Fix what you find. If a deeper
    review tool exists in this environment, use it.
 
-6. **Ship**: `TASKS ship <id>` from the claim workdir (optional `--message`,
-   `--title`, `--body`, `--version-intent`, `--base <parent-branch>` when
-   stacking). It owns commit/push/PR-create and the move to `status=review`;
-   idempotent if the PR is already open, and errors on an empty ship. Do
-   **not** hand-roll any of those steps.
+6. **Ship**: `TASKS ship <id> --shipped "<what actually shipped>"` from the
+   claim workdir (optional `--message`, `--title`, `--body`,
+   `--version-intent`, `--base <parent-branch>` when stacking). It owns
+   commit/push/PR-create and the move to `status=review`; idempotent if the
+   PR is already open, and errors on an empty ship. Do **not** hand-roll any
+   of those steps.
+
+   **Shipped record** — `--shipped` is required; ship refuses without it. One
+   or two sentences on **the result, not the plan**: what actually landed,
+   including where it diverged from the task's intent and anything knowingly
+   left out. It is appended to the task body as `Shipped (<date>): …`
+   (durable in `.tasks/`, visible to `TASKS show`, survives iteration-close)
+   and mirrored onto the PR body on create and on every re-ship. Don't
+   restate the title or paraphrase the description back — a record that only
+   echoes the intent is the thing this exists to prevent.
 
    **Version intent** — only when the product versions releases (its docs say
    whether and how; assume no scheme or file). Never edit version files on
@@ -141,5 +151,7 @@ single id. `/dev auto` stays one task per cycle.
    auto-start review. Non-integrator implementers: normal handoff is enough.
 
 **Resuming after changes were requested** on the PR: same flow from step 4 on
-the existing branch; fix on the branch, `TASKS ship <id>`, then note on the PR
-what changed (`gh pr comment`).
+the existing branch; fix on the branch, `TASKS ship <id> --shipped "<what
+changed since the last ship>"`, then note on the PR what changed
+(`gh pr comment`). The re-ship record covers the fixes, not the whole task
+again — the earlier records stay.

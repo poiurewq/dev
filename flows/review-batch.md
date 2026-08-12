@@ -49,7 +49,8 @@ For each member (any order for reading; prefer stack bottom→top for context):
 2. Present findings + recommendation (approve / request changes) **for the
    whole set together** when possible (one sitting).
 3. On **request changes** for member Tᵢ: do **not** land anyone. The author
-   fixes on the branch and re-pushes with `TASKS ship <i>`. Then propagate:
+   fixes on the branch and re-pushes with `TASKS ship <i> --shipped "<what
+   changed>"`. Then propagate:
    `TASKS restack --ids <full open set> --after <i>` (fail-closed — a
    conflict aborts that rebase and stops). Earlier plan steps may already be
    force-pushed; that is expected, not a half-open rebase. Resolve the failed

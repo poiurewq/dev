@@ -29,7 +29,9 @@ TASKS init --name <handle> [--scope <subdir>] [--integration <branch>]
            [--parent <branch>] [--iteration <name>]
 TASKS whoami                            # this checkout's identity (exits
                                         # nonzero if not set)
-TASKS config [<key> [<value>]]          # settable: integrator, parent_branch
+TASKS config [<key> [<value>]]          # settable: integrator, parent_branch,
+                                        # iteration (rename; literal, and
+                                        # refused once closed-not-landed)
 TASKS area list
 TASKS area set <name> [--desc "<one-line scope>"]
 TASKS area rm <name> [--force]
@@ -61,7 +63,8 @@ TASKS claim <id> [--assignee <who>] [--branch <b>]
                                         # always a linked worktree under
                                         # .dev/worktrees (primary stays hub),
                                         # status=doing; prints workdir
-TASKS ship <id> [--message M] [--title T] [--body B]
+TASKS ship <id> --shipped "<what actually shipped>"
+                [--message M] [--title T] [--body B]
                 [--version-intent <intent>] [--base <branch>]
                 [--batch <id,id,…>]     # commit if dirty ([T<id>] prefix),
                                         # push, gh pr create if none open,
@@ -69,6 +72,10 @@ TASKS ship <id> [--message M] [--title T] [--body B]
                                         # reuses the open PR, so --title /
                                         # --body / --version-intent / --base
                                         # apply on create only.
+                                        # --shipped is REQUIRED on every ship
+                                        # (result, not plan): appended to the
+                                        # task body as Shipped (<date>): … and
+                                        # mirrored onto the PR body each ship.
                                         # --version-intent has no default;
                                         # --base stacks; --batch stamps
                                         # Dev-batch on PR + task body
@@ -154,12 +161,17 @@ away, or paper over it with manual git/gh.
   branch: `NNN.md` (one file per task), `board.yml` (`schema_version`,
   integration_branch, parent_branch, iteration, integrator, contributors),
   `areas.md` (area names + one-line scopes), `log.md` (past-iteration
-  summaries). Missing `schema_version` means 0; see product `AGENTS.md` for
-  compatibility rules when changing board schema. Task frontmatter may carry
-  `kind` (`umbrella` = goal parent; absent/empty = normal). An umbrella's
-  `deps` are its **direct children** (leaves or nested umbrellas) — hierarchy
-  is the dep graph among `kind: umbrella` nodes, with no separate parent
-  field. `TASKS board` collapses those children under the umbrella with a
+  index), `archive/<iteration>/NNN.md` (every closed task, verbatim — the
+  full record the log only indexes). Iteration names are stored as
+  `<YYYY-MM-DD>-<name>` (start date, applied at `init`/`iteration-new`), so
+  archive dirs and log sections stay in the order they happened. Missing
+  `schema_version` means 0; see product `AGENTS.md` for compatibility rules
+  when changing board schema.
+  Task frontmatter may carry `kind` (`umbrella` = goal parent; absent/empty
+  = normal). An umbrella's `deps` are its **direct children** (leaves or
+  nested umbrellas) — hierarchy is the dep graph among `kind: umbrella`
+  nodes, with no separate parent field.
+  `TASKS board` collapses those children under the umbrella with a
   leaf status rollup; `--expand` lists every task flat; `--by-area` groups by
   area instead of status (same collapse).
 - `<scope>/.dev/` — product-local, gitignored, per-checkout (root board →
@@ -196,7 +208,7 @@ marks an open design fork awaiting a human call, detailed in the task body.
 | `/dev delete <id>` | Confirm, then `TASKS delete <id>`. |
 | `/dev drop <id>` / "we're not doing this" | Not planned, below — offer delete as the alternative and let the user pick. |
 | `/dev show <id>` | `TASKS show <id>`. |
-| `/dev config [key] [value]` | `TASKS config ...` (settable: integrator, parent_branch). |
+| `/dev config [key] [value]` | `TASKS config ...` (settable: integrator, parent_branch, iteration). |
 | `/dev area ...` | Area stewardship, below. |
 | `/dev skill` | `SKILL_CMD status` — version, auto-update state, skill commands. |
 | `/dev skill update` | `SKILL_CMD update` — pull latest skill from github.com/poiurewq/dev. |

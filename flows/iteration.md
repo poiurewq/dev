@@ -5,9 +5,19 @@ iteration; cross-iteration references are `<iteration>/T<id>` (log.md lines
 are already written that way). Boards whose integration branch is `main` with
 no parent simply never close — fine for simple repos.
 
+**Names carry their start date.** `init` and `iteration-new` store the
+iteration as `<YYYY-MM-DD>-<name>`, prefixing whatever was passed (or the
+branch name) unless it already starts with an ISO date. That is what makes
+archive dirs and log.md sections reconstruct the order the project was built
+in — don't strip the date when referring to an iteration.
+
 ## `/dev iteration` — show
 
 `TASKS iteration`: scope, name, branch, parent, done/total.
+
+To rename the current iteration: `TASKS config iteration <new-name>` (stored
+literally — add your own date prefix). Refused once the iteration is closed
+but not yet landed, since the land gate matches log.md's close heading.
 
 ## `/dev iteration close`
 
@@ -20,9 +30,13 @@ no parent simply never close — fine for simple repos.
    deliberate call, not a shrug.
 2. `TASKS iteration-close` (add `--force` only after the user accepts the
    carry-over list — genuinely abandoned tasks should be `not-planned` first,
-   so `--force` covers only the carried-over ones). This logs every task to
-   `.tasks/log.md` (dropped ones marked `[not planned]`) and removes the
-   files — git history keeps the full bodies.
+   so `--force` covers only the carried-over ones). This copies every task
+   file verbatim to `.tasks/archive/<iteration>/NNN.md` — the full record,
+   greppable and browsable long after the iteration — and indexes them in
+   `.tasks/log.md` (one line per task with area, PR, and `[not planned]` /
+   `[unfinished: …]` flags, each task's `Shipped (<date>): …` records under
+   it), then removes the live files. Nothing is lost; point people at the
+   archive, not at git history of a deleted file.
 3. **Land the iteration**: `TASKS iteration-land` (opens the PR if needed,
    then merges with a **merge commit**, not squash). Requires a closed board:
    no live task files and a `log.md` close section for the current iteration
@@ -33,12 +47,19 @@ no parent simply never close — fine for simple repos.
 
 ## `/dev iteration new <branch>`
 
-1. After the close PR has merged: `TASKS iteration-new <branch> [--parent p]
-   [--name n]`. This starts a fresh board on the new branch **and commits a
+1. After the close PR has merged — **enforced**, not just advised:
+   `TASKS iteration-new <branch> [--parent p] [--name n]` refuses while the
+   current integration branch is not yet contained in the parent, since the
+   new board starts from the parent and would otherwise be missing the last
+   iteration's archive and log.md close section. Land it first; there is no
+   override. This starts a fresh board on the new branch **and commits a
    pointer to the parent's board.yml** so other contributors' stale checkouts
    auto-resolve to the new iteration. That pointer commit pushes to the
    parent — on a push-protected parent it will warn, and contributors then
-   need a one-time `TASKS init --integration <branch>`.
+   need a one-time `TASKS init --integration <branch>`. It also refuses a name
+   whose archive dir already exists (a reused iteration name would overwrite
+   that iteration at close) — pick another `--name`; renaming is free here.
 2. Remind the user: `git checkout <branch>`.
-3. Re-add any carried-over tasks (fresh ids, same bodies; keep a
+3. Re-add any carried-over tasks (fresh ids, same bodies — read them from
+   `.tasks/archive/<old-iteration>/NNN.md`; keep a
    `carried from <old-iteration>/T<n>` note in each).

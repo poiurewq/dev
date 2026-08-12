@@ -48,7 +48,9 @@ Run the steps below **before claiming anything**, then run
    per id (lightweight re-check of state, claim, branch, implement, ship).
    Reuse the shared ahead check if the tree is still clean.
    - **Ship stamp:** every member's ship must carry the full set:
-     `TASKS ship <id> --batch <id,id,…>` (sorted ids of the whole batch).
+     `TASKS ship <id> --batch <id,id,…> --shipped "<what actually shipped>"`
+     (sorted ids of the whole batch; the shipped record is per task, never
+     one summary reused across the set).
      That writes `Dev-batch: …` on the PR body and task body so review can
      gate partial review and land the set together
      (`flows/review-batch.md`).
@@ -65,5 +67,6 @@ Run the steps below **before claiming anything**, then run
    the batch, unless the user later asks. Each task still gets its own branch
    and PR. Prefer `origin/<integration>` as the base; if a later task truly
    needs unmerged code from an earlier one, stack on that task's branch
-   (`TASKS ship --base <parent-branch> --batch …`) and note the dependency in
+   (`TASKS ship --base <parent-branch> --batch … --shipped …`) and note the
+   dependency in
    the PR body.

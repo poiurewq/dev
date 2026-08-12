@@ -61,7 +61,9 @@ integration branch — that is human-only (flows/implement.md preflight).
    branch, and return to step 2. Only flag *genuine* forks — choices repo
    conventions already settle don't count. (Local-ahead was already cleared
    or soft-noted in step 1 — do not re-triage park/discard here.)
-6. **Ship** via `TASKS ship <id>` (ends at `--status review --pr <url>`).
+6. **Ship** via `TASKS ship <id> --shipped "<what actually shipped>"` (ends at
+   `--status review --pr <url>`). The shipped record is required — result,
+   not plan; see flows/implement.md step 6.
    When the product versions, pass `--version-intent` (or the line in
    `--body`) per flows/implement.md — the script does not default it. If the
    change is major/breaking, do not ship — flag `needs: decision` like other
