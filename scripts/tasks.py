@@ -15,7 +15,9 @@ several product boards share one integration branch, push uses rebase/retry
 (policy A). Code branches never commit to .tasks/.
 
 Stdlib + git for board CRUD. Git/gh lifecycle helpers: `claim` (implement
-setup), `land` / `cleanup` (post-approval merge). Never auto-approve reviews.
+setup), `ship` (commit/push/PR; optional Dev-batch stamp), `preflight`,
+`restack` (fail-closed stack rebase), `batch-gate` (review-set completeness),
+`land` / `cleanup`, `iteration-land`. Never auto-approve reviews.
 """
 import argparse
 import datetime
@@ -894,8 +896,8 @@ def _rebase_in_existing_checkout(root, branch, upstream, checkout):
         git("rebase", "--abort", cwd=checkout, check=False)
         err = (r.stderr or r.stdout or "").strip()
         sys.exit(f"error: rebase of '{branch}' onto {upstream} failed "
-                 f"(conflicts?). Resolve in {checkout}, then re-run land.\n"
-                 f"{err}")
+                 f"(conflicts?). Resolve in {checkout}, then re-run "
+                 f"land or restack.\n{err}")
     after = git("rev-parse", branch, cwd=root).stdout.strip()
     return before != after
 
@@ -922,7 +924,7 @@ def _rebase_via_temp_worktree(root, branch, upstream):
             err = (r.stderr or r.stdout or "").strip()
             sys.exit(f"error: rebase of '{branch}' onto {upstream} failed "
                      f"(conflicts?). Fetch/rebase the task branch, resolve, "
-                     f"push, then re-run land.\n{err}")
+                     f"push, then re-run land or restack.\n{err}")
         new = git("rev-parse", "HEAD", cwd=tmp).stdout.strip()
         # Temp worktree still holds detached HEAD at `new`; drop it before
         # moving the branch ref (and before any other worktree reset).
@@ -938,7 +940,8 @@ def _rebase_via_temp_worktree(root, branch, upstream):
             if dirty:
                 sys.exit(f"error: rebased tip is {new[:12]} but worktree has "
                          f"uncommitted changes; commit/stash, reset to the "
-                         f"rebased tip, then re-run land:\n{checkout}")
+                         f"rebased tip, then re-run land or restack:\n"
+                         f"{checkout}")
             git("reset", "--hard", new, cwd=checkout)
         else:
             git("branch", "-f", branch, new, cwd=root)
@@ -951,17 +954,21 @@ def _rebase_via_temp_worktree(root, branch, upstream):
         git("worktree", "prune", cwd=root, check=False)
 
 
-def rebase_task_onto_integration(root, branch, integration):
-    """Rebase task branch onto origin/<integration>. Returns True if rewritten.
+def rebase_task_onto_ref(root, branch, upstream):
+    """Rebase task branch onto upstream ref. Returns True if rewritten.
 
     Force-push is the caller's job when True. Conflicts abort and exit.
     Rebases in the existing checkout if the branch is already checked out;
     otherwise uses a temp worktree so the primary clone is never switched
-    onto the task branch solely for the rebase.
+    onto the task branch solely for the rebase. Never rewrites integration.
     """
-    upstream = f"origin/{integration}"
     if not ref_exists(root, upstream):
-        sys.exit(f"error: {upstream} missing after fetch")
+        # Try origin/<name> if bare branch name given
+        if not upstream.startswith("origin/") and ref_exists(
+                root, f"origin/{upstream}"):
+            upstream = f"origin/{upstream}"
+        elif not ref_exists(root, upstream):
+            sys.exit(f"error: upstream '{upstream}' missing after fetch")
     sync_task_branch_from_remote(root, branch)
     behind = git("rev-list", "--count", f"{branch}..{upstream}",
                  cwd=root).stdout.strip()
@@ -969,13 +976,13 @@ def rebase_task_onto_integration(root, branch, integration):
         return False
     checkout = branch_checkout_cwd(root, branch)
     if checkout:
-        # Already checked out (task worktree or primary) — rebase in place.
-        # Does not switch any other worktree onto the branch.
         return _rebase_in_existing_checkout(root, branch, upstream, checkout)
-    # Not checked out anywhere: temp detached worktree + move branch ref.
-    # Never `git rebase <upstream> <branch>` (that form checks the branch out
-    # on the primary clone).
     return _rebase_via_temp_worktree(root, branch, upstream)
+
+
+def rebase_task_onto_integration(root, branch, integration):
+    """Rebase task branch onto origin/<integration>. Returns True if rewritten."""
+    return rebase_task_onto_ref(root, branch, f"origin/{integration}")
 
 
 def push_task_branch(root, branch, force=False):
@@ -1536,6 +1543,952 @@ def cmd_claim(args):
     print(f"  base:    origin/{integration}")
 
 
+# ---------- ship (implement: commit, push, open PR) ----------
+
+def path_is_tasks_dir(path):
+    """True if path is inside a .tasks board directory (must not ship on code)."""
+    norm = path.replace("\\", "/")
+    return bool(re.search(r"(^|/)\.tasks(/|$)", norm))
+
+
+def path_under_task_worktrees(root, scope, path):
+    """True if path is under <product>/.dev/worktrees/ (claim policy)."""
+    wt_root = os.path.realpath(
+        os.path.join(product_root(root, scope), ".dev", "worktrees"))
+    try:
+        real = os.path.realpath(path)
+    except OSError:
+        return False
+    try:
+        return os.path.commonpath([wt_root, real]) == wt_root
+    except ValueError:
+        return False
+
+
+def find_open_pr_for_branch(root, branch, base):
+    """Return PR url for an open PR with this head branch and base, or ''."""
+    r = gh("pr", "list", "--head", branch, "--base", base, "--state", "open",
+           "--json", "url,number", "--limit", "5", cwd=root, check=False)
+    if r.returncode != 0:
+        return ""
+    try:
+        items = json.loads(r.stdout or "[]")
+    except json.JSONDecodeError:
+        return ""
+    if not items:
+        r = gh("pr", "list", "--head", branch, "--state", "open",
+               "--json", "url,baseRefName", "--limit", "5", cwd=root,
+               check=False)
+        if r.returncode != 0:
+            return ""
+        try:
+            items = json.loads(r.stdout or "[]")
+        except json.JSONDecodeError:
+            return ""
+        items = [i for i in items if (i.get("baseRefName") or "") == base]
+    if not items:
+        return ""
+    return (items[0].get("url") or "").strip()
+
+
+def ship_work_cwd(root, scope, meta, branch):
+    """Directory that has the task branch checked out for committing/pushing.
+
+    Prefer a claim-style linked worktree under .dev/worktrees/; fall back to
+    any checkout of the branch. Soft-warn when not under .dev/worktrees/.
+    """
+    work = None
+    for path in find_task_worktree_paths(root, scope, meta["id"], branch):
+        if current_branch_name(path) != branch:
+            continue
+        if path_under_task_worktrees(root, scope, path):
+            return path
+        if work is None:
+            work = path
+    if work is None:
+        work = branch_checkout_cwd(root, branch)
+    if not work:
+        sys.exit(f"error: task branch '{branch}' is not checked out anywhere; "
+                 f"run claim first")
+    if not path_under_task_worktrees(root, scope, work):
+        print(f"warning: shipping from {work} (not under "
+              f"<scope>/.dev/worktrees/); prefer the claim workdir",
+              file=sys.stderr)
+    return work
+
+
+def commits_ahead(root, branch, base_ref):
+    """Commits on branch not in base_ref, or None if rev-list failed."""
+    r = git("rev-list", "--count", f"{base_ref}..{branch}", cwd=root,
+            check=False)
+    if r.returncode != 0:
+        return None
+    s = (r.stdout or "").strip()
+    if not s.isdigit():
+        return None
+    return int(s)
+
+
+# ---------- Dev-batch stamp + restack / batch-gate ----------
+
+DEV_BATCH_RE = re.compile(
+    r"(?im)^\s*Dev-batch:\s*([0-9]+(?:\s*,\s*[0-9]+)*)\s*$")
+
+
+def parse_id_list(s):
+    """Parse '1,2,3' or '1 2 3' into a sorted unique list of ints."""
+    if not s:
+        return []
+    ids = [int(x) for x in re.findall(r"\d+", str(s))]
+    return sorted(set(ids))
+
+
+def format_dev_batch(ids):
+    """Machine line: Dev-batch: 19,20,22,23 (sorted)."""
+    ids = sorted(set(int(i) for i in ids))
+    return "Dev-batch: " + ",".join(str(i) for i in ids)
+
+
+def parse_dev_batch(text):
+    """Extract Dev-batch ids from task body or PR body, or []."""
+    if not text:
+        return []
+    m = DEV_BATCH_RE.search(text)
+    if not m:
+        return []
+    return parse_id_list(m.group(1))
+
+
+def ensure_dev_batch_in_text(text, ids):
+    """Insert or replace Dev-batch line; returns new text."""
+    line = format_dev_batch(ids)
+    text = text or ""
+    if DEV_BATCH_RE.search(text):
+        return DEV_BATCH_RE.sub(line, text, count=1)
+    return text.rstrip() + ("\n\n" if text.strip() else "") + line + "\n"
+
+
+def pr_is_open(info):
+    if not info:
+        return False
+    return (info.get("state") or "").upper() == "OPEN" and not pr_is_merged(info)
+
+
+def load_task_pr_stack_info(root, bw, scope, tid):
+    """Return dict: id, branch, pr, base, head, open, body, status, deps."""
+    meta = find_task(bw, scope, tid)
+    pr = (meta.get("pr") or "").strip()
+    branch = task_branch_name(meta)
+    info = pr_view(root, pr, soft=True) if pr else None
+    base = ((info or {}).get("baseRefName") or "").strip()
+    head = ((info or {}).get("headRefName") or "").strip() or branch
+    body = (info or {}).get("body") or ""
+    return {
+        "id": tid,
+        "meta": meta,
+        "status": meta.get("status") or "",
+        "branch": branch,
+        "pr": pr,
+        "base": base,
+        "head": head,
+        "open": pr_is_open(info),
+        "body": body,
+        "deps": list(meta.get("deps") or []),
+        "task_body": meta.get("body") or "",
+    }
+
+
+def discover_batch_ids_for_task(root, bw, scope, tid, integration):
+    """Full batch id list for a task: stamp first, else stack component."""
+    info = load_task_pr_stack_info(root, bw, scope, tid)
+    stamped = parse_dev_batch(info["body"]) or parse_dev_batch(info["task_body"])
+    if stamped:
+        return stamped
+    # Fallback: connected component via PR base↔head among status=review.
+    return stack_component_ids(root, bw, scope, tid, integration)
+
+
+def stack_component_ids(root, bw, scope, seed_tid, integration):
+    """Connected component of review tasks linked by PR base == other head."""
+    review = [t for t in all_tasks(bw, scope) if t["status"] == "review"]
+    infos = {}
+    for t in review:
+        infos[t["id"]] = load_task_pr_stack_info(root, bw, scope, t["id"])
+    if seed_tid not in infos:
+        # Seed may still be review-stamped but status moved; include alone.
+        return [seed_tid] if find_task(bw, scope, seed_tid) else []
+    # Map branch name -> task id for members
+    by_branch = {}
+    for tid, inf in infos.items():
+        b = (inf.get("branch") or inf.get("head") or "").strip()
+        if b:
+            by_branch[b] = tid
+    # Undirected edges via base pointing at another member's branch
+    adj = {tid: set() for tid in infos}
+    for tid, inf in infos.items():
+        base = (inf.get("base") or "").strip()
+        if not base or base == integration:
+            continue
+        parent = by_branch.get(base)
+        if parent is not None and parent != tid:
+            adj[tid].add(parent)
+            adj[parent].add(tid)
+    # BFS from seed
+    seen = set()
+    stack = [seed_tid]
+    while stack:
+        cur = stack.pop()
+        if cur in seen or cur not in adj:
+            continue
+        seen.add(cur)
+        stack.extend(adj[cur] - seen)
+    return sorted(seen) if seen else [seed_tid]
+
+
+def open_batch_comembers(root, bw, scope, batch_ids):
+    """Subset of batch_ids still in review with an open PR."""
+    open_ids = []
+    for tid in batch_ids:
+        try:
+            meta = find_task(bw, scope, tid)
+        except SystemExit:
+            continue
+        if meta.get("status") != "review":
+            continue
+        pr = (meta.get("pr") or "").strip()
+        if not pr:
+            continue
+        info = pr_view(root, pr, soft=True)
+        if pr_is_open(info):
+            open_ids.append(tid)
+    return open_ids
+
+
+def cmd_batch_gate(args):
+    """Refuse partial review of an open Dev-batch (or stack component).
+
+    Exit 0 if selection covers every still-open co-member of the batch(es)
+    touched by the selection. Exit 2 if a proper subset (list missing ids).
+    """
+    root, scope, integration, bw = ctx()
+    selected = parse_id_list(args.ids or "")
+    if not selected:
+        sys.exit("error: batch-gate requires --ids <id,id,…>")
+
+    require_gh(root)
+    # Union of still-open co-members for every selected id's batch
+    required = set()
+    for tid in selected:
+        try:
+            find_task(bw, scope, tid)
+        except SystemExit:
+            sys.exit(f"error: no task with id {tid}")
+        batch = discover_batch_ids_for_task(root, bw, scope, tid, integration)
+        open_ids = open_batch_comembers(root, bw, scope, batch)
+        if not open_ids:
+            continue
+        required.update(open_ids)
+
+    selected_set = set(selected)
+    # If nothing required (no open batch), selection is fine.
+    if not required:
+        print(f"batch-gate: ok — no open batch co-members for "
+              f"{', '.join(f'T{i}' for i in selected)}")
+        return
+
+    missing = sorted(required - selected_set)
+    if missing:
+        print(f"batch-gate: incomplete set — still open co-members missing: "
+              f"{', '.join(f'T{i}' for i in missing)}")
+        print(f"  selected: {', '.join(f'T{i}' for i in selected)}")
+        print(f"  required open set: "
+              f"{', '.join(f'T{i}' for i in sorted(required))}")
+        print(f"  re-run: /dev review "
+              f"{','.join(str(i) for i in sorted(required))}")
+        sys.exit(2)
+    print(f"batch-gate: ok — "
+          f"{', '.join(f'T{i}' for i in sorted(required))}")
+
+
+def build_stack_parent_map(infos, integration):
+    """Map child_id -> parent_id when child's PR base is parent's branch."""
+    by_branch = {}
+    for tid, inf in infos.items():
+        b = (inf.get("branch") or inf.get("head") or "").strip()
+        if b:
+            by_branch[b] = tid
+    parent = {}
+    for tid, inf in infos.items():
+        base = (inf.get("base") or "").strip()
+        if not base or base == integration:
+            continue
+        p = by_branch.get(base)
+        if p is not None and p != tid:
+            parent[tid] = p
+    return parent
+
+
+def topo_order_ids(ids, parent_map, dep_edges):
+    """Topo order: parents/deps before children. Tie-break lower id."""
+    ids = sorted(set(ids))
+    # edges: A -> B means A before B (B depends on A)
+    preds = {i: set() for i in ids}
+    for i in ids:
+        p = parent_map.get(i)
+        if p in preds:
+            preds[i].add(p)
+        for d in dep_edges.get(i, []):
+            if d in preds:
+                preds[i].add(d)
+    ordered = []
+    ready = sorted(i for i, ps in preds.items() if not ps)
+    seen = set()
+    while ready:
+        n = ready.pop(0)
+        if n in seen:
+            continue
+        seen.add(n)
+        ordered.append(n)
+        for i, ps in preds.items():
+            if n in ps:
+                ps.discard(n)
+                if not ps and i not in seen:
+                    ready.append(i)
+        ready.sort()
+    if len(ordered) != len(ids):
+        cycle = sorted(set(ids) - set(ordered))
+        label = ", ".join(f"T{i}" for i in cycle)
+        sys.exit(f"error: cycle in restack set among {label}")
+    return ordered
+
+
+def descendants_of(parent_map, root_id, ids):
+    """Ids in set that are stack-descendants of root_id (not including root)."""
+    children = {i: [] for i in ids}
+    for c, p in parent_map.items():
+        if c in children and p in children:
+            children[p].append(c)
+    out = []
+    stack = list(children.get(root_id, []))
+    seen = set()
+    while stack:
+        n = stack.pop()
+        if n in seen:
+            continue
+        seen.add(n)
+        out.append(n)
+        stack.extend(children.get(n, []))
+    return out
+
+
+def cmd_restack(args):
+    """Fail-closed stack restack for a Dev-batch / stack set.
+
+    Prints a plan, then applies unless --dry-run. force-with-lease only;
+    dirty worktrees refuse; conflicts abort the current rebase and stop
+    (earlier plan steps may already be force-pushed — re-run restack after
+    resolve; already-up-to-date members no-op). When a member's stack parent
+    is outside --ids, rebases onto integration and auto-retargets the PR
+    base (land-safe default); --onto / --retarget still force retarget.
+    --onto rebases every target onto that ref (does not cascade children
+    onto restacked parents); omit it to preserve in-set stack parents.
+    """
+    root, scope, integration, bw = ctx()
+    ids = parse_id_list(args.ids or "")
+    if not ids:
+        sys.exit("error: restack requires --ids <id,id,…>")
+    require_gh(root)
+    if not has_remote(root):
+        sys.exit("error: no origin remote; cannot restack")
+
+    after = args.after
+    onto = (args.onto or "").strip()
+    dry = bool(args.dry_run)
+    retarget = bool(args.retarget)
+
+    # Never rewrite integration as a task branch.
+    for tid in ids:
+        meta = find_task(bw, scope, tid)
+        b = task_branch_name(meta)
+        if b and b == integration:
+            sys.exit(f"error: T{tid} branch is integration '{integration}'; "
+                     "refusing restack")
+
+    git("fetch", "origin", cwd=root, check=False)
+    infos = {tid: load_task_pr_stack_info(root, bw, scope, tid) for tid in ids}
+    parent_map = build_stack_parent_map(infos, integration)
+    dep_edges = {tid: infos[tid]["deps"] for tid in ids}
+
+    if after is not None:
+        if after not in ids:
+            sys.exit(f"error: --after {after} is not in --ids")
+        targets = descendants_of(parent_map, after, ids)
+        if not targets:
+            print(f"restack: no stack descendants of T{after} in the set")
+            return
+    else:
+        targets = list(ids)
+
+    order = topo_order_ids(targets, parent_map, dep_edges)
+
+    plan = []
+    for tid in order:
+        inf = infos[tid]
+        branch = inf["branch"]
+        if not branch:
+            sys.exit(f"error: T{tid} has no branch recorded")
+        if onto:
+            upstream = onto if onto.startswith("origin/") else (
+                f"origin/{onto}" if ref_exists(root, f"origin/{onto}") else onto)
+            new_base_for_pr = onto[len("origin/"):] if onto.startswith(
+                "origin/") else onto
+        else:
+            p = parent_map.get(tid)
+            if p is not None:
+                pbranch = infos[p]["branch"]
+                upstream = (f"origin/{pbranch}"
+                            if ref_exists(root, f"origin/{pbranch}")
+                            else pbranch)
+                new_base_for_pr = pbranch
+            else:
+                upstream = f"origin/{integration}"
+                new_base_for_pr = integration
+        # Retarget when: explicit --retarget / --onto, or land-safe default —
+        # stack parent is outside the set so we rebase onto integration while
+        # the PR still targets a sibling (or other non-integration) base.
+        old_base = (inf.get("base") or "").strip()
+        want_retarget = bool(retarget or onto)
+        if (not want_retarget
+                and new_base_for_pr == integration
+                and old_base and old_base != integration):
+            want_retarget = True
+        planned_new_base = new_base_for_pr if want_retarget else old_base
+        plan.append({
+            "id": tid,
+            "branch": branch,
+            "upstream": upstream,
+            "pr": inf["pr"],
+            "old_base": old_base,
+            "new_base": planned_new_base,
+            "retarget": want_retarget and old_base != planned_new_base,
+        })
+
+    print("restack plan:")
+    for step in plan:
+        rflag = f" retarget-base→{step['new_base']}" if step.get("retarget") else ""
+        print(f"  T{step['id']}: {step['branch']} onto {step['upstream']}{rflag}")
+    if dry:
+        print("restack: dry-run only (no changes)")
+        return
+
+    for step in plan:
+        tid = step["id"]
+        branch = step["branch"]
+        upstream = step["upstream"]
+        # Dirty check on any checkout of the branch
+        checkout = branch_checkout_cwd(root, branch)
+        if checkout and worktree_is_dirty(checkout):
+            sys.exit(f"error: T{tid} worktree dirty at {checkout}; "
+                     "commit/stash before restack")
+        print(f"restack T{tid}: rebase {branch} onto {upstream}…")
+        try:
+            rewritten = rebase_task_onto_ref(root, branch, upstream)
+        except SystemExit:
+            raise
+        if rewritten:
+            print(f"  rewritten; push --force-with-lease")
+            push_task_branch(root, branch, force=True)
+        else:
+            print(f"  already up to date with {upstream}")
+            push_task_branch(root, branch, force=False)
+        if step.get("retarget") and step["pr"] and step["new_base"]:
+            if step["old_base"] != step["new_base"]:
+                r = gh("pr", "edit", step["pr"], "--base", step["new_base"],
+                       cwd=root, check=False)
+                if r.returncode != 0:
+                    err = (r.stderr or r.stdout or "").strip()
+                    sys.exit(f"error: could not retarget T{tid} PR base to "
+                             f"{step['new_base']}:\n{err}")
+                print(f"  PR base {step['old_base'] or '?'} → {step['new_base']}")
+    print("restack: done")
+
+
+def cmd_ship(args):
+    """Ship end of implement: commit if needed, push, open PR, mark review.
+
+    Mirrors hand-rolled implement ship, with stricter guards: never commit
+    .tasks/ paths, refuse empty ship, one push via push_task_branch.
+    Version intent is agent-owned (optional --version-intent / --body only).
+    """
+    root, scope, integration, bw = ctx()
+    meta = find_task(bw, scope, args.id)
+    tid = meta["id"]
+    branch = task_branch_name(meta)
+    if not branch:
+        sys.exit(f"error: T{tid} has no branch; run claim first")
+    if meta["status"] in ("done", "not-planned", "proposed"):
+        sys.exit(f"error: T{tid} is {meta['status']}; cannot ship")
+
+    require_gh(root)
+    if not has_remote(root):
+        sys.exit("error: no origin remote; cannot ship")
+
+    work = ship_work_cwd(root, scope, meta, branch)
+    print(f"T{tid}: ship from {work} (branch {branch})")
+
+    if worktree_is_dirty(work):
+        msg = (args.message or "").strip() or f"[T{tid}] {meta['title']}"
+        prefix = f"[T{tid}]"
+        if not msg.startswith(prefix):
+            msg = f"{prefix} {msg}"
+        r = git("add", "-A", cwd=work, check=False)
+        if r.returncode != 0:
+            err = (r.stderr or r.stdout or "").strip()
+            sys.exit(f"error: git add failed in {work}:\n{err}")
+        staged = git("diff", "--cached", "--name-only", cwd=work,
+                     check=False).stdout.strip()
+        if not staged:
+            sys.exit(f"error: worktree dirty but nothing staged in {work}")
+        board_paths = [ln for ln in staged.splitlines()
+                       if path_is_tasks_dir(ln)]
+        if board_paths:
+            git("reset", "HEAD", cwd=work, check=False)
+            listed = "\n".join(f"  {p}" for p in board_paths[:20])
+            more = "" if len(board_paths) <= 20 else f"\n  …+{len(board_paths)-20} more"
+            sys.exit(f"error: .tasks/ paths staged in {work}; board state "
+                     f"must not ship on a code branch:\n{listed}{more}")
+        r = git("commit", "-m", msg, cwd=work, check=False)
+        if r.returncode != 0:
+            err = (r.stderr or r.stdout or "").strip()
+            sys.exit(f"error: commit failed in {work}:\n{err}")
+        print(f"  committed: {msg}")
+
+    # PR base defaults to integration; --base stacks on another task branch.
+    pr_base = (args.base or "").strip() or integration
+
+    batch_ids = parse_id_list(getattr(args, "batch", None) or "")
+    if batch_ids and tid not in batch_ids:
+        batch_ids = sorted(set(batch_ids) | {tid})
+    batch_line = format_dev_batch(batch_ids) if batch_ids else ""
+
+    pr_url = (meta.get("pr") or "").strip()
+    if pr_url:
+        info = pr_view(root, pr_url, soft=True)
+        if info and pr_is_merged(info):
+            sys.exit(f"error: T{tid} PR already merged: {pr_url}")
+        if not (info and (info.get("state") or "").upper() == "OPEN"):
+            # Closed/unknown recorded URL — look for a live open PR.
+            # Open PR is reused as-is; --title/--body/--version-intent/--base
+            # apply only when creating below.
+            pr_url = find_open_pr_for_branch(root, branch, pr_base)
+    else:
+        pr_url = find_open_pr_for_branch(root, branch, pr_base)
+
+    git("fetch", "origin", integration, cwd=root, check=False)
+    if not pr_url:
+        # Nothing to open: clean tree and no commits ahead of integration.
+        ahead = commits_ahead(root, branch, f"origin/{integration}")
+        if ahead is None:
+            # Branch may lack remote tracking yet; try local integration.
+            ahead = commits_ahead(root, branch, integration)
+        if ahead is None or ahead == 0:
+            sys.exit(f"error: nothing to ship on '{branch}' (clean worktree, "
+                     f"no commits ahead of origin/{integration}, no open PR)")
+
+    # One push (same helper as land). Explicit refspec; no -u (skill ship is
+    # plain "push"; park-as-PR is the only flow that documents git push -u).
+    push_task_branch(root, branch, force=False)
+
+    if not pr_url:
+        title = (args.title or "").strip() or f"[T{tid}] {meta['title']}"
+        if not title.startswith(f"[T{tid}]"):
+            title = f"[T{tid}] {title}"
+        body = (args.body or "").strip()
+        if not body:
+            body = (meta.get("body") or "").strip() or meta["title"]
+        intent = (args.version_intent or "").strip()
+        if intent and not re.search(r"(?im)^\s*Version intent:", body):
+            body = body.rstrip() + f"\n\nVersion intent: {intent}\n"
+        if batch_line:
+            body = ensure_dev_batch_in_text(body, batch_ids)
+        r = gh("pr", "create", "--base", pr_base, "--head", branch,
+               "--title", title, "--body", body, cwd=root, check=False)
+        if r.returncode != 0:
+            err = (r.stderr or r.stdout or "").strip()
+            pr_url = find_open_pr_for_branch(root, branch, pr_base)
+            if not pr_url:
+                sys.exit(f"error: gh pr create failed:\n{err}")
+            print(f"  PR appeared during create: {pr_url}")
+        else:
+            pr_url = (r.stdout or "").strip().splitlines()[-1].strip()
+            print(f"  opened PR: {pr_url}")
+    else:
+        print(f"  PR: {pr_url}")
+        # Ensure Dev-batch stamp on an existing open PR when --batch given.
+        if batch_ids:
+            info = pr_view(root, pr_url, soft=True) or {}
+            body = info.get("body") or ""
+            if parse_dev_batch(body) != batch_ids:
+                new_body = ensure_dev_batch_in_text(body, batch_ids)
+                r = gh("pr", "edit", pr_url, "--body", new_body, cwd=root,
+                       check=False)
+                if r.returncode != 0:
+                    err = (r.stderr or r.stdout or "").strip()
+                    print(f"  warning: could not stamp Dev-batch on PR: {err}",
+                          file=sys.stderr)
+                else:
+                    print(f"  stamped PR: {format_dev_batch(batch_ids)}")
+
+    integration, bw = resolve_board(root, scope)
+    meta = find_task(bw, scope, tid)
+    changes = []
+    if meta["status"] != "review":
+        meta["status"] = "review"
+        changes.append("status=review")
+    if meta.get("pr") != pr_url:
+        meta["pr"] = pr_url
+        changes.append(f"pr={pr_url}")
+    if batch_ids and parse_dev_batch(meta.get("body") or "") != batch_ids:
+        meta["body"] = ensure_dev_batch_in_text(meta.get("body") or "",
+                                               batch_ids)
+        changes.append("batch-stamp")
+    if changes:
+        with open(meta["path"], "w") as f:
+            f.write(render_task(meta))
+        board_commit(root, integration, bw, scope,
+                     f"dev: update T{tid} ({', '.join(changes)})")
+        print(f"T{tid} updated: {', '.join(changes)}")
+    print(f"T{tid}: shipped → {pr_url}")
+
+
+def scope_path_is_in_scope(scope, path):
+    """Whether a repo-relative path is in this board's product scope."""
+    norm = path.replace("\\", "/").lstrip("./")
+    if scope in (".", ""):
+        return True
+    prefix = scope.replace("\\", "/").rstrip("/") + "/"
+    return (norm == scope.replace("\\", "/").rstrip("/")
+            or norm.startswith(prefix))
+
+
+def local_integration_ahead_state(root, scope, integration):
+    """Describe local integration commits ahead of origin.
+
+    Returns dict with ahead, commits, in_scope, out_of_scope path lists.
+    Caller should fetch origin first.
+    """
+    remote_ref = f"origin/{integration}"
+    if not ref_exists(root, remote_ref):
+        return {"ahead": 0, "commits": [], "in_scope": [], "out_of_scope": [],
+                "missing_remote": True}
+    if not ref_exists(root, f"refs/heads/{integration}"):
+        return {"ahead": 0, "commits": [], "in_scope": [], "out_of_scope": [],
+                "missing_local": True}
+    n = git("rev-list", "--count", f"{remote_ref}..{integration}",
+            cwd=root).stdout.strip()
+    ahead = int(n or "0")
+    commits = []
+    if ahead:
+        commits = git(
+            "log", "--oneline", f"{remote_ref}..{integration}", cwd=root
+        ).stdout.strip().splitlines()
+    paths = []
+    if ahead:
+        paths = git(
+            "diff", "--name-only", f"{remote_ref}..{integration}", cwd=root
+        ).stdout.strip().splitlines()
+    in_scope, out_of_scope = [], []
+    for p in paths:
+        if not p:
+            continue
+        if scope_path_is_in_scope(scope, p):
+            in_scope.append(p)
+        else:
+            out_of_scope.append(p)
+    return {"ahead": ahead, "commits": commits, "in_scope": in_scope,
+            "out_of_scope": out_of_scope}
+
+
+def cmd_preflight(args):
+    """Local integration ahead of origin: check, park-as-PR, or discard.
+
+    Exit 0: clear, or ahead only on out-of-scope paths.
+    Exit 2: in-scope ahead in check mode (implement must stop).
+    Park/discard require a clean working tree checked out on integration.
+    """
+    root, scope, integration, bw = ctx()
+    mode = "check"
+    if args.park:
+        mode = "park"
+    if args.discard:
+        if mode == "park":
+            sys.exit("error: pass only one of --park / --discard")
+        mode = "discard"
+
+    if not has_remote(root):
+        sys.exit("error: no origin remote; cannot preflight")
+    git("fetch", "origin", integration, cwd=root, check=False)
+    state = local_integration_ahead_state(root, scope, integration)
+    if state.get("missing_remote"):
+        sys.exit(f"error: origin/{integration} missing after fetch")
+    if state.get("missing_local"):
+        print(f"preflight: no local branch '{integration}' "
+              f"(task branches use origin/{integration}; clear)")
+        return
+
+    ahead = state["ahead"]
+    if ahead == 0:
+        print(f"preflight: local '{integration}' is not ahead of "
+              f"origin/{integration}")
+        return
+
+    print(f"preflight: local '{integration}' is {ahead} commit(s) ahead of "
+          f"origin/{integration}")
+    for c in state["commits"]:
+        print(f"  {c}")
+    if state["in_scope"]:
+        print("  in-scope paths:")
+        for p in state["in_scope"]:
+            print(f"    {p}")
+    if state["out_of_scope"]:
+        print("  out-of-scope paths:")
+        for p in state["out_of_scope"]:
+            print(f"    {p}")
+
+    if not state["in_scope"]:
+        print("preflight: ahead only on out-of-scope paths — ok to continue")
+        return
+
+    if mode == "check":
+        print("preflight: in-scope ahead — park-as-PR or discard before "
+              "implement (TASKS preflight --park | --discard)")
+        sys.exit(2)
+
+    # Park/discard hard-reset the primary clone's integration branch (claim
+    # hub). A task worktree on another branch is not enough.
+    cur = current_branch_name(root)
+    if cur != integration:
+        sys.exit(
+            f"error: park/discard need primary clone on '{integration}' "
+            f"(primary={root}, currently '{cur or 'detached/unknown'}'). "
+            f"Checkout '{integration}' there and re-run — task worktrees "
+            f"are not enough."
+        )
+    if worktree_is_dirty(root):
+        sys.exit(f"error: working tree on '{integration}' is dirty; "
+                 "commit/stash/elsewhere before park or discard")
+
+    if mode == "discard":
+        git("reset", "--hard", f"origin/{integration}", cwd=root)
+        print(f"preflight: discarded local commits; '{integration}' == "
+              f"origin/{integration}")
+        return
+
+    require_gh(root)
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y%m%d-%H%M%S")
+    park_branch = f"park/{integration}-{stamp}"
+    git("branch", park_branch, integration, cwd=root)
+    r = git("push", "-u", "origin", park_branch, cwd=root, check=False)
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "").strip()
+        # Push failed: nothing durable on origin; drop local park ref only.
+        # Ahead commits remain on local integration.
+        git("branch", "-D", park_branch, cwd=root, check=False)
+        sys.exit(f"error: push of park branch failed:\n{err}")
+
+    # Commits are safe on local + remote park/*. Reset local integration to
+    # origin so implement can proceed even if PR create fails next.
+    # (origin/<integration> is already the desired tip — ahead was local-only.)
+    git("reset", "--hard", f"origin/{integration}", cwd=root)
+    print(f"preflight: parked on {park_branch}", flush=True)
+    print(f"  local '{integration}' reset to origin/{integration}",
+          flush=True)
+
+    title = f"park: local {integration} ahead of origin ({stamp})"
+    body = (
+        "Parked local integration commits that were ahead of origin "
+        "before implement.\n\n"
+        f"Scope: {scope}\n"
+        f"Commits:\n" + "\n".join(f"- {c}" for c in state["commits"])
+    )
+    pr_err = ""
+    pr_url = ""
+    for attempt in range(1, 4):
+        r = gh("pr", "create", "--base", integration, "--head", park_branch,
+               "--title", title, "--body", body, cwd=root, check=False)
+        if r.returncode == 0:
+            pr_url = (r.stdout or "").strip().splitlines()[-1].strip()
+            break
+        pr_err = (r.stderr or r.stdout or "").strip()
+        if attempt < 3:
+            print(f"preflight: gh pr create failed (attempt {attempt}/3); "
+                  f"retrying…", flush=True)
+            time.sleep(1)
+    if pr_url:
+        print(f"  PR: {pr_url}")
+        return
+    # Park succeeded (remote park/* + local integration reset). PR create is
+    # the happy path but must not block implement — exit 0 and yell so the
+    # agent surfaces the failure to the user.
+    print(
+        "WARNING: preflight: gh pr create failed after retries — "
+        "SURFACE THIS TO THE USER.\n"
+        f"  park branch is safe — do not delete '{park_branch}' "
+        f"(local or origin) until reviewed.\n"
+        f"  finish PR: gh pr create --base {integration} "
+        f"--head {park_branch} --title {title!r}\n"
+        f"  local '{integration}' already reset; implement may proceed.\n"
+        f"{pr_err}",
+        flush=True,
+    )
+
+
+def iteration_close_ready(bw, scope, iteration_name):
+    """Return an error string if the board is not closed for land, else None.
+
+    Ready means: no live task files, and log.md has a close heading for this
+    iteration (written by iteration-close as ``## {name} — closed …``).
+    """
+    tasks = all_tasks(bw, scope)
+    if tasks:
+        ids = ", ".join(f"T{t['id']}" for t in tasks)
+        return (f"board still has tasks ({ids}); run TASKS iteration-close "
+                f"before iteration-land")
+    log_path = os.path.join(bw, tdir(scope), "log.md")
+    rel = f"{tdir(scope)}/log.md"
+    if not os.path.isfile(log_path):
+        return (f"no {rel} close entry for iteration {iteration_name!r}; "
+                f"run TASKS iteration-close first")
+    # Match the heading iteration-close writes; any such section for this
+    # name counts (re-close of the same name is not expected on one branch).
+    needle = f"## {iteration_name} — closed "
+    with open(log_path) as f:
+        text = f.read()
+    if needle not in text:
+        return (f"no log close section for iteration {iteration_name!r} in "
+                f"{rel}; run TASKS iteration-close first")
+    return None
+
+
+def cmd_iteration_land(args):
+    """Open/merge the iteration PR (merge commit) into parent_branch.
+
+    Idempotent when origin/integration is already contained in
+    origin/parent (prior land, manual merge, or empty delta). Does not
+    auto-approve. Requires a closed board: no task files and a log.md
+    close section for the current iteration.
+    """
+    root, scope, integration, bw = ctx()
+    cfg = read_board_cfg(bw, scope)
+    parent = (cfg.get("parent_branch") or "").strip()
+    if not parent:
+        sys.exit("error: no parent_branch configured; iteration land needs a "
+                 "parent to merge into (main-with-no-parent boards never close)")
+    if parent == integration:
+        sys.exit(f"error: parent_branch equals integration_branch "
+                 f"('{integration}')")
+    name = cfg.get("iteration") or integration
+    not_ready = iteration_close_ready(bw, scope, name)
+    if not_ready:
+        sys.exit(f"error: {not_ready}")
+    require_gh(root)
+    if not has_remote(root):
+        sys.exit("error: no origin remote; cannot iteration-land")
+
+    git("fetch", "origin", parent, integration, cwd=root, check=False)
+    if not ref_exists(root, f"origin/{integration}"):
+        sys.exit(f"error: origin/{integration} missing; push the integration "
+                 "branch before iteration-land")
+    if not ref_exists(root, f"origin/{parent}"):
+        sys.exit(f"error: origin/{parent} missing after fetch")
+
+    # Prefer an open PR; remember a prior MERGED URL for messaging only.
+    # "Already landed" is git ancestry (integration tip in parent), not
+    # merely the existence of a past MERGED PR — integration may have
+    # advanced after that land and still need a new PR.
+    open_url = ""
+    merged_url = ""
+    r = gh("pr", "list", "--head", integration, "--base", parent,
+           "--state", "all", "--json", "url,state,mergedAt,number",
+           "--limit", "10", cwd=root, check=False)
+    if r.returncode == 0:
+        try:
+            items = json.loads(r.stdout or "[]")
+        except json.JSONDecodeError:
+            items = []
+        for it in items:
+            st = (it.get("state") or "").upper()
+            if st == "OPEN" and not open_url:
+                open_url = (it.get("url") or "").strip()
+            elif (st == "MERGED" or it.get("mergedAt")) and not merged_url:
+                merged_url = (it.get("url") or "").strip()
+
+    anc = git("merge-base", "--is-ancestor",
+              f"origin/{integration}", f"origin/{parent}",
+              cwd=root, check=False)
+    if anc.returncode == 0:
+        note = f" ({merged_url})" if merged_url else ""
+        print(f"iteration-land: already merged{note}")
+        print("next: TASKS iteration-new <branch> when ready")
+        return
+
+    pr_url = open_url
+    if not pr_url:
+        title = (args.title or "").strip() or f"iteration {name}"
+        body = (args.body or "").strip() or (
+            f"Land iteration '{name}' (`{integration}` → `{parent}`) "
+            f"with a merge commit (not squash).\n")
+        r = gh("pr", "create", "--base", parent, "--head", integration,
+               "--title", title, "--body", body, cwd=root, check=False)
+        if r.returncode != 0:
+            err = (r.stderr or r.stdout or "").strip()
+            sys.exit(f"error: gh pr create failed:\n{err}")
+        pr_url = (r.stdout or "").strip().splitlines()[-1].strip()
+        print(f"iteration-land: opened {pr_url}")
+    else:
+        print(f"iteration-land: existing open PR {pr_url}")
+
+    if args.create_only:
+        print("iteration-land: --create-only set; not merging")
+        return
+
+    last_err = ""
+    for attempt in range(1, LAND_RETRIES + 1):
+        readiness = wait_for_pr_mergeable(root, pr_url)
+        if readiness == "MERGED":
+            print("iteration-land: PR became merged while waiting")
+            print("next: TASKS iteration-new <branch>")
+            return
+        if readiness == "CONFLICTING":
+            sys.exit(f"error: iteration PR is CONFLICTING; resolve and "
+                     f"re-run iteration-land:\n{pr_url}")
+        r = gh("pr", "merge", pr_url, "--merge", cwd=root, check=False)
+        out = ((r.stdout or "") + (r.stderr or "")).strip()
+        if r.returncode == 0:
+            print(f"iteration-land: merged (merge commit) attempt {attempt}")
+            print("next: TASKS iteration-new <branch>")
+            return
+        last_err = out
+        low = out.lower()
+        if "already merged" in low:
+            print("iteration-land: already merged")
+            print("next: TASKS iteration-new <branch>")
+            return
+        info = pr_view(root, pr_url, soft=True)
+        if info and pr_is_merged(info):
+            print("iteration-land: already merged")
+            print("next: TASKS iteration-new <branch>")
+            return
+        if not merge_error_transient(out):
+            sys.exit(merge_fail_permanent_message(out))
+        print(f"  merge attempt {attempt} failed (transient); retry…")
+        if attempt < LAND_RETRIES:
+            time.sleep(min(2 * attempt, 8))
+    sys.exit(f"error: could not merge iteration PR after {LAND_RETRIES} "
+             f"attempts:\n{last_err}")
+
+
 # ---------- commands ----------
 
 def cmd_init(args):
@@ -1832,16 +2785,13 @@ def fmt_line(t, tasks):
     return " ".join(parts)
 
 
-def cmd_board(args):
-    root, scope, branch, bw = ctx()
-    cfg = read_board_cfg(bw, scope)
-    tasks = all_tasks(bw, scope)
-    expand = bool(getattr(args, "expand", False))
-    covered = set() if expand else covered_by_umbrellas(tasks)
-    title = f"# Board — iteration {cfg.get('iteration', '')}"
-    if scope != ".":
-        title += f" ({scope})"
-    lines = [title, ""]
+def _board_task_line(t, tasks):
+    mark = {"done": "x", "not-planned": "~"}.get(t["status"], " ")
+    return f"- [{mark}] {fmt_line(t, tasks)}"
+
+
+def _board_by_status(tasks, covered):
+    lines = []
     for status in STATUSES:
         col = [t for t in tasks if t["status"] == status
                and t["id"] not in covered]
@@ -1851,9 +2801,79 @@ def cmd_board(args):
         label = STATUS_LABEL.get(status, status.capitalize())
         lines.append(f"## {label} ({len(col)})")
         for t in col:
-            mark = {"done": "x", "not-planned": "~"}.get(status, " ")
-            lines.append(f"- [{mark}] {fmt_line(t, tasks)}")
+            lines.append(_board_task_line(t, tasks))
         lines.append("")
+    return lines
+
+
+def _board_by_area(bw, scope, tasks, covered):
+    """Group visible tasks by area. Multi-area tasks appear under each area.
+
+    Column order: areas.md order, then other named areas (sorted), then
+    reserved `all`, then untagged. Empty named areas from areas.md are kept
+    so the cut shows the full map; empty ad-hoc / all / untagged are omitted.
+    """
+    visible = [t for t in tasks if t["id"] not in covered]
+    known = list(read_areas(bw, scope).keys())  # insertion order
+    buckets = {name: [] for name in known}
+    ad_hoc = {}  # area -> [tasks], excluding known and reserved
+    all_col = []
+    untagged = []
+    for t in visible:
+        areas = split_areas(t.get("area", ""))
+        if not areas:
+            untagged.append(t)
+            continue
+        for a in areas:
+            if a == "all":
+                all_col.append(t)
+            elif a in buckets:
+                buckets[a].append(t)
+            else:
+                ad_hoc.setdefault(a, []).append(t)
+    lines = []
+    for name in known:
+        col = buckets[name]
+        lines.append(f"## {name} ({len(col)})")
+        for t in col:
+            lines.append(_board_task_line(t, tasks))
+        lines.append("")
+    for name in sorted(ad_hoc):
+        col = ad_hoc[name]
+        lines.append(f"## {name} ({len(col)})")
+        for t in col:
+            lines.append(_board_task_line(t, tasks))
+        lines.append("")
+    if all_col:
+        lines.append(f"## all ({len(all_col)})")
+        for t in all_col:
+            lines.append(_board_task_line(t, tasks))
+        lines.append("")
+    if untagged:
+        lines.append(f"## (untagged) ({len(untagged)})")
+        for t in untagged:
+            lines.append(_board_task_line(t, tasks))
+        lines.append("")
+    return lines
+
+
+def cmd_board(args):
+    root, scope, branch, bw = ctx()
+    cfg = read_board_cfg(bw, scope)
+    tasks = all_tasks(bw, scope)
+    expand = bool(getattr(args, "expand", False))
+    by_area = bool(getattr(args, "by_area", False))
+    covered = set() if expand else covered_by_umbrellas(tasks)
+    title = f"# Board — iteration {cfg.get('iteration', '')}"
+    if scope != ".":
+        title += f" ({scope})"
+    if by_area:
+        title += " · by area"
+    lines = [title, ""]
+    if by_area:
+        lines.extend(_board_by_area(bw, scope, tasks, covered))
+    else:
+        lines.extend(_board_by_status(tasks, covered))
     out = "\n".join(lines)
     with open(os.path.join(root, scope, "TASKS.md"), "w") as f:
         f.write(out)
@@ -1914,8 +2934,8 @@ def cmd_iteration_close(args):
     print(f"iteration '{name}' closed: {len(tasks)} tasks logged to "
           f"{tdir(scope)}/log.md and removed")
     if parent:
-        print(f"next: open a PR landing '{branch}' into '{parent}', then "
-              f"after it merges: tasks.py iteration-new <branch>")
+        print(f"next: TASKS iteration-land  # merge-commit PR into '{parent}'")
+        print(f"      then after merge: TASKS iteration-new <branch>")
 
 
 def cmd_iteration_new(args):
@@ -2035,6 +3055,9 @@ def main():
     s = sub.add_parser("board", help="print kanban view; regenerate TASKS.md")
     s.add_argument("--expand", action="store_true",
                    help="list all tasks flat (do not collapse umbrella children)")
+    s.add_argument("--by-area", action="store_true",
+                   help="group by area instead of status (multi-area tasks "
+                        "listed under each area)")
     s.set_defaults(fn=cmd_board)
 
     s = sub.add_parser("iteration", help="show current iteration")
@@ -2051,6 +3074,14 @@ def main():
     s.add_argument("--name", help="iteration name (default: branch name)")
     s.set_defaults(fn=cmd_iteration_new)
 
+    s = sub.add_parser("iteration-land",
+                       help="open/merge iteration PR into parent (merge commit, not squash)")
+    s.add_argument("--title", help="PR title (default: iteration <name>)")
+    s.add_argument("--body", help="PR body")
+    s.add_argument("--create-only", action="store_true",
+                   help="open the PR but do not merge")
+    s.set_defaults(fn=cmd_iteration_land)
+
     s = sub.add_parser("claim",
                        help="implement setup: branch + linked worktree, status=doing")
     s.add_argument("id", type=int)
@@ -2059,6 +3090,60 @@ def main():
     s.add_argument("--branch",
                    help="task branch (default: recorded or dev/<scope?>-<id>-<slug>)")
     s.set_defaults(fn=cmd_claim)
+
+    s = sub.add_parser("ship",
+                       help="implement ship: commit [T<id>], push, open PR, status=review")
+    s.add_argument("id", type=int)
+    s.add_argument("--message", "-m",
+                   help="commit message if worktree dirty (default: [T<id>] <title>)")
+    s.add_argument("--title",
+                   help="PR title on create only (default: [T<id>] <task title>)")
+    s.add_argument("--body",
+                   help="PR body on create only (default: task body)")
+    s.add_argument("--version-intent",
+                   help="on create only: append 'Version intent: …' when body lacks "
+                        "that line (agent only; no default — omit when product does "
+                        "not version)")
+    s.add_argument("--base",
+                   help="PR base on create only (default: integration; stack with "
+                        "another task branch name)")
+    s.add_argument("--batch",
+                   help="implement-batch stamp: comma-separated task ids "
+                        "(writes Dev-batch: … on PR body + task body)")
+    s.set_defaults(fn=cmd_ship)
+
+    s = sub.add_parser("batch-gate",
+                       help="exit 2 if --ids is a proper subset of an open Dev-batch")
+    s.add_argument("--ids", required=True,
+                   help="selected task ids, e.g. 19,20 or 19,20,22,23")
+    s.set_defaults(fn=cmd_batch_gate)
+
+    s = sub.add_parser("restack",
+                       help="fail-closed rebase of a task stack/batch (plan then apply)")
+    s.add_argument("--ids", required=True,
+                   help="task ids in the set, e.g. 19,20,22,23")
+    s.add_argument("--after", type=int,
+                   help="only restack stack descendants of this task id")
+    s.add_argument("--onto",
+                   help="rebase every target onto this ref (e.g. main or "
+                        "origin/main) — does not cascade (children do not "
+                        "stay based on restacked parents; default without "
+                        "--onto preserves in-set stack parents); implies "
+                        "PR base retarget unless base already matches")
+    s.add_argument("--retarget", action="store_true",
+                   help="gh pr edit --base to the new stack parent / --onto")
+    s.add_argument("--dry-run", action="store_true",
+                   help="print plan only (also land order for the set); "
+                        "do not rebase or push")
+    s.set_defaults(fn=cmd_restack)
+
+    s = sub.add_parser("preflight",
+                       help="local integration ahead of origin: check / park / discard")
+    s.add_argument("--park", action="store_true",
+                   help="park ahead commits as a PR, reset local integration")
+    s.add_argument("--discard", action="store_true",
+                   help="reset local integration to origin (drops ahead commits)")
+    s.set_defaults(fn=cmd_preflight)
 
     s = sub.add_parser("land",
                        help="merge task PR (squash), cleanup branches/worktree, mark done")

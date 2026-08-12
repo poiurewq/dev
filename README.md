@@ -17,8 +17,8 @@ git clone https://github.com/poiurewq/dev.git ~/.grok/skills/dev
 git clone https://github.com/poiurewq/dev.git ~/.claude/skills/dev
 ```
 
-If you use more than one agent, clone once per skills root (or only into the
-one you care about — updates apply to the install that is running).
+With more than one agent, clone once per skills root, or just the one you use
+— updates apply to the install that is running.
 
 Requires: `git`, `python3`, and for board workflows `gh` (GitHub CLI)
 authenticated against the target repo.
@@ -34,18 +34,25 @@ In a repo (with at least one commit and a GitHub `origin`):
 That walks you through identity + board setup. Then `/dev help` for the
 full command map.
 
-## Keep the skill updated
+## The skill itself (`/dev skill`)
 
-The skill tracks `main` on this repo. A throttled check runs on common `/dev`
-entry points and prints one quiet line when you are behind.
+`/dev skill ...` acts on the installed skill; every other command acts on
+your board. The skill tracks `main` on this repo, and a throttled check on
+common `/dev` entry points prints one quiet line when you are behind.
 
 | Command | Effect |
 |---|---|
-| `/dev update` | `git pull --ff-only` in the skill install |
-| `/dev update auto on` | opt-in: checks may apply updates |
-| `/dev update auto off` | default — notify only |
+| `/dev skill` | version, auto-update state, these commands |
+| `/dev skill update` | `git pull --ff-only` in the skill install |
+| `/dev skill update auto on` | opt-in: checks may apply updates |
+| `/dev skill update auto off` | default — notify only |
+| `/dev skill feedback <text>` | file a GitHub issue on this repo — bugs and ideas about the skill |
 
 Prefs (survive pulls): `~/.config/dev-skill/config.yml`.
+
+`/dev skill feedback` opens a public GitHub issue on this repo via `gh`; your
+agent shows you the draft first, and only skill version and platform are
+attached — no repo names, paths, or task content.
 
 ## Layout (this repo)
 
@@ -54,5 +61,5 @@ SKILL.md           # agent-facing router
 VERSION            # semver (one line)
 flows/             # multi-step procedures
 scripts/tasks.py   # board state API
-scripts/self_update.py
+scripts/skill.py   # status / update / feedback
 ```

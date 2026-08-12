@@ -1,12 +1,16 @@
-# /dev review [id] — the unified inbox
+# /dev review [id[, id…]] — the unified inbox
 
 Three kinds of pending human judgment live on the board. You draft; the user
 decides. Never approve, merge, resolve a fork, or accept a proposal without
 an explicit go-ahead from the user in this conversation.
 
-**Plain language first.** For every PR, fork, or proposal (inbox list and
-when diving into one item), open with one plain sentence of what the task is
-for — goal from the task body, not file-level nits or a long PR recap.
+**Plain language first.** For every PR, fork, or proposal — in the inbox list
+and when diving into one item — open with one plain sentence of what the task
+is for: the goal from the task body, not file-level nits or a long PR recap.
+
+**Several task ids** (or "all under umbrella …"): read
+`flows/review-batch.md` and follow it — two-phase review-all then ordered
+land; do not load that file for a single independent PR.
 
 ## `/dev review` (no id) — show the inbox
 
@@ -15,7 +19,9 @@ After a PR state refresh (SKILL.md):
    plain sentence of purpose, then note which the current user may merge
    (anyone except the task's assignee; the integrator may merge anything,
    including their own). Ones already at `CHANGES_REQUESTED` are the
-   assignee's move, not a review item.
+   assignee's move, not a review item. When several share a `Dev-batch:`
+   line (or stack bases), group them and prefer `/dev review <ids…>` over
+   landing one-by-one.
 2. **Design forks**: `TASKS list --needs decision` — one plain sentence of
    purpose, then the open question in one line.
 3. **Proposed tasks**: `TASKS list --status proposed` — one plain sentence
@@ -23,10 +29,18 @@ After a PR state refresh (SKILL.md):
 
 Let the user pick what to handle; batch small decisions in one sitting.
 
-**Several open PRs:** pick a land order with the user (deps, area overlap,
-risk). Do **not** resolve pairwise conflicts against sibling task branches
-(`git merge-tree` between heads, etc.). `TASKS land <id>` one, then land the
-next (land rebases onto the updated integration branch as needed) — repeat.
+**Several open PRs (no Dev-batch / no stack):** pick a land order with the
+user (deps, area overlap, risk). Do **not** resolve pairwise conflicts
+against sibling task branches (`git merge-tree` between heads, etc.).
+`TASKS land <id>` one, then the next (land rebases onto the updated
+integration branch as needed) — repeat. **When a Dev-batch or stack
+applies**, `flows/review-batch.md` supersedes this path.
+
+## Single-id gate (before reviewing one implementation PR)
+
+Run `TASKS batch-gate --ids <id>`. Exit 2 means open batch co-members are
+missing — surface the output and **stop** (hard refuse); tell the user to
+re-run with the full required set. Exit 0 → continue below.
 
 ## Reviewing an implementation PR
 
@@ -40,44 +54,39 @@ next (land rebases onto the updated integration branch as needed) — repeat.
 3. On the user's verdict:
    - **Approve & land**: conversational go-ahead in this chat is the human
      decision. If the PR author is **not** the current user, also
-     `gh pr review --approve` (optional audit trail). If the author **is**
-     the current user, **skip** `gh pr review --approve` — GitHub rejects
-     self-approves. After go-ahead, run `TASKS land <id>` (do not hand-roll
-     merge/rebase/cleanup). It rebases onto integration if needed (via the
-     task worktree or a temp worktree — never by switching the primary
-     clone's checkout), waits for GitHub `mergeable` after push, then
-     squash-merges with retry on transient not-mergeable / CONFLICTING,
-     removes the task worktree/local branch, prunes remote-tracking, and
-     marks the task `done`. Idempotent if the PR is already merged
-     (`TASKS cleanup <id>` alone for leftover local state; cleanup deletes
-     the task branch only when the PR is verified MERGED, and skips dirty
-     worktrees). Land does **not** auto-approve. Land refuses if the PR
-     base is not the board integration branch. If land prints a **Version
-     intent** other than `none`, apply that bump on the integration branch
-     after merge per the product's versioning docs (not on the task
-     branch). Run land from the primary clone or product dir — not from
-     inside the task worktree it will remove. **Always surface the script's
-     full output** (stdout and stderr): on non-zero exit or any early abort
-     (`error: …`), show the message to the user and stop — do not retry
-     with hand-rolled git/gh, and do not claim the task landed.
-   - **Request changes**: concise and actionable; task stays in `review`.
+     `gh pr review --approve` (optional audit trail); if the author **is**
+     the current user, **skip** it — GitHub rejects self-approves. Then run
+     `TASKS land <id>`, which owns rebase, merge, cleanup and the move to
+     `done`; never hand-roll any of it. Land does **not** auto-approve, and
+     refuses if the PR base is not the board integration branch. Run it from
+     the primary clone or product dir — not from inside the task worktree it
+     will remove. Idempotent if the PR is already merged; `TASKS cleanup
+     <id>` alone clears leftover local state, deleting the task branch only
+     when the PR is verified MERGED and never touching a dirty worktree. If
+     land prints a **Version intent** other than `none`, apply that bump on
+     the integration branch after merge per the product's versioning docs
+     (not on the task branch). **Always surface the script's full output**:
+     on non-zero exit or any early abort (`error: …`), show the message and
+     stop — do not retry with hand-rolled git/gh, and do not claim the task
+     landed.
+   - **Request changes**: concise and actionable; the task stays in `review`.
      If the PR author is **not** the current user:
-     `gh pr review --request-changes --body <agreed comments>`. If the
-     author **is** the current user, GitHub also blocks that — post the
-     same body with `gh pr comment` (or `gh pr review --comment`) instead,
-     then fix on the branch (resume path in flows/implement.md).
+     `gh pr review --request-changes --body <agreed comments>`. If the author
+     **is** the current user, GitHub also blocks that — post the same body
+     with `gh pr comment` (or `gh pr review --comment`) instead, then fix on
+     the branch (resume path in flows/implement.md).
 
 ## Deciding a design fork (`needs: decision`)
 
 1. `TASKS show <id>` — the body carries the fork, options, and the filing
    agent's recommendation. Open with one plain sentence of what the task is
    for, then present the fork as a one-question decision.
-2. On the user's call: record the decision and return the task to the pool:
+2. On the user's call, record it and return the task to the pool:
    `TASKS update <id> --needs "" --status backlog --append "Decision: <choice
    + one-line why>"`.
-3. If the fork's resolution is "don't do this at all", that's a
-   not-planned outcome instead: `TASKS update <id> --needs "" --status
-   not-planned --reason "<the user's why>"`.
+3. If the resolution is "don't do this at all", that's a not-planned outcome
+   instead: `TASKS update <id> --needs "" --status not-planned --reason
+   "<the user's why>"`.
 
 ## Adjudicating proposed tasks
 

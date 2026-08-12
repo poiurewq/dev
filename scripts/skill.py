@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Skill self-update for the public dev skill (github.com/poiurewq/dev).
+"""Skill-meta commands for the public dev skill (github.com/poiurewq/dev).
+
+Backs the `/dev skill ...` namespace: everything acting on the installed
+skill itself rather than on the user's product board.
 
 Install (public consumers): git clone into an agent skills directory, e.g.
   git clone https://github.com/poiurewq/dev.git ~/.grok/skills/dev
@@ -17,16 +20,20 @@ SCHEMA_VERSION in this file is what we write. Missing schema_version → 0.
 Never downgrade a higher schema_version stamp; preserve unknown keys.
 
 Commands:
+  status  Local version, auto-update state, and the skill commands.
   check   Throttled version check vs origin/main VERSION. Quiet if local >=
           public or network fails. One line if behind. If auto_update, apply.
   update  Ignore throttle; git pull --ff-only origin main (requires clone).
   auto    Show or set auto_update (on|off|true|false).
+  feedback  Open an issue on the public repo (maintainer inbox) via gh.
 """
 
 from __future__ import annotations
 
 import argparse
+import platform
 import re
+import shutil
 import subprocess
 import sys
 import urllib.error
@@ -38,6 +45,7 @@ from pathlib import Path
 
 CONFIG_SCHEMA_VERSION = 1
 CANONICAL_REPO = "https://github.com/poiurewq/dev"
+REPO_SLUG = "poiurewq/dev"
 VERSION_URL = "https://raw.githubusercontent.com/poiurewq/dev/main/VERSION"
 DEFAULT_INTERVAL_HOURS = 24
 CONFIG_DIR = Path.home() / ".config" / "dev-skill"
@@ -96,7 +104,7 @@ def read_config() -> dict[str, str]:
     if v > CONFIG_SCHEMA_VERSION:
         print(
             f"warning: dev-skill config schema_version {v} is newer than "
-            f"this self_update.py (supports {CONFIG_SCHEMA_VERSION}); "
+            f"this skill.py (supports {CONFIG_SCHEMA_VERSION}); "
             f"unknown fields may be ignored",
             file=sys.stderr,
         )
@@ -272,6 +280,17 @@ def origin_looks_canonical(url: str) -> bool:
     )
 
 
+def origin_url(path: Path) -> str:
+    """URL of remote 'origin', or "" if there is none."""
+    r = subprocess.run(
+        ["git", "-C", str(path), "remote", "get-url", "origin"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return (r.stdout or "").strip() if r.returncode == 0 else ""
+
+
 def git_pull_ff(path: Path) -> tuple[bool, str]:
     """Fast-forward pull origin main. Returns (ok, message)."""
     if not is_skill_git_root(path):
@@ -280,19 +299,13 @@ def git_pull_ff(path: Path) -> tuple[bool, str]:
             "skill dir is not a standalone git clone of poiurewq/dev; install with:\n"
             f"  git clone {CANONICAL_REPO}.git <agent-skills>/dev",
         )
-    rem = subprocess.run(
-        ["git", "-C", str(path), "remote", "get-url", "origin"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if rem.returncode != 0:
+    url = origin_url(path)
+    if not url:
         return False, "no git remote 'origin'; set origin to poiurewq/dev and retry"
-    origin_url = (rem.stdout or "").strip()
-    if not origin_looks_canonical(origin_url):
+    if not origin_looks_canonical(url):
         return (
             False,
-            f"origin is {origin_url!r}, expected poiurewq/dev; "
+            f"origin is {url!r}, expected poiurewq/dev; "
             "refusing to pull a different remote",
         )
     r = subprocess.run(
@@ -344,7 +357,7 @@ def cmd_check(*, force: bool = False) -> int:
 
     print(
         f"dev skill {public} available (you have {local}) — "
-        f"/dev update, or /dev update auto on"
+        f"/dev skill update, or /dev skill update auto on"
     )
     return 0
 
@@ -386,12 +399,88 @@ def cmd_auto(value: str | None) -> int:
     return 0
 
 
+def cmd_status() -> int:
+    cfg = read_config()
+    on = parse_bool(cfg.get("auto_update", "false"))
+    print(f"dev skill {local_version()}")
+    print(f"auto-update: {'on' if on else 'off'}")
+    print("update:  /dev skill update")
+    print("feedback:  /dev skill feedback <text>")
+    return 0
+
+
+def install_kind() -> str:
+    """How this skill copy was installed — coarse label for issue triage.
+
+    Only the canonical clone is updatable, so distinguish it from a git root
+    pointing elsewhere (fork, or the skill developed inside another repo).
+    """
+    if not is_skill_git_root(SKILL_DIR):
+        return "copied (no git)"
+    if origin_looks_canonical(origin_url(SKILL_DIR)):
+        return "git clone"
+    return "git clone (other origin)"
+
+
+def feedback_context() -> str:
+    """Environment lines appended to an issue body.
+
+    Goes to a PUBLIC repo: version and platform only — never paths, repo or
+    board names, or task content.
+    """
+    return "\n".join(
+        [
+            f"- dev skill: {local_version()}",
+            f"- install: {install_kind()}",
+            f"- python: {platform.python_version()}",
+            f"- os: {platform.system()} {platform.release()}",
+        ]
+    )
+
+
+def cmd_feedback(title: str, body: str | None) -> int:
+    title = (title or "").strip()
+    if not title:
+        print("error: feedback title is empty", file=sys.stderr)
+        return 1
+    if shutil.which("gh") is None:
+        print(
+            "error: gh not found; install GitHub CLI and run 'gh auth login', "
+            f"or open an issue directly at {CANONICAL_REPO}/issues",
+            file=sys.stderr,
+        )
+        return 1
+    text = (body or "").strip()
+    full_body = f"{text}\n\n---\n\n{feedback_context()}" if text else feedback_context()
+    r = subprocess.run(
+        [
+            "gh", "issue", "create",
+            "--repo", REPO_SLUG,
+            "--title", title,
+            "--body", full_body,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if r.returncode != 0:
+        detail = (r.stderr or r.stdout or "").strip()
+        print(f"error: gh issue create failed: {detail}", file=sys.stderr)
+        return 1
+    # gh prints the new issue URL as its last stdout line.
+    lines = (r.stdout or "").strip().splitlines()
+    print(f"filed: {lines[-1] if lines else CANONICAL_REPO + '/issues'}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
-        prog="self_update.py",
-        description="Update the local dev skill from github.com/poiurewq/dev",
+        prog="skill.py",
+        description="Skill-meta commands for the dev skill (github.com/poiurewq/dev)",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("status", help="version, auto-update state, skill commands")
 
     c = sub.add_parser("check", help="throttled version check / optional auto-apply")
     c.add_argument(
@@ -409,13 +498,21 @@ def main(argv: list[str] | None = None) -> int:
         help="on|off (omit to show current)",
     )
 
+    r = sub.add_parser("feedback", help=f"open an issue on {REPO_SLUG}")
+    r.add_argument("--title", required=True, help="issue title")
+    r.add_argument("--body", help="issue body (context is appended)")
+
     args = p.parse_args(argv)
+    if args.cmd == "status":
+        return cmd_status()
     if args.cmd == "check":
         return cmd_check(force=bool(getattr(args, "force", False)))
     if args.cmd == "update":
         return cmd_update()
     if args.cmd == "auto":
         return cmd_auto(getattr(args, "value", None))
+    if args.cmd == "feedback":
+        return cmd_feedback(args.title, getattr(args, "body", None))
     p.error(f"unknown command: {args.cmd}")
     return 2
 
