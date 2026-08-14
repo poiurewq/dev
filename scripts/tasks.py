@@ -106,6 +106,22 @@ def repo_root():
     return worktree_root()
 
 
+def git_path(root, rel):
+    """Resolve a path inside the git dir (e.g. info/exclude).
+
+    Uses --git-path, not --git-dir: worktree git-dirs do not own shared
+    files such as info/exclude.
+    """
+    r = git("rev-parse", "--path-format=absolute", "--git-path", rel,
+            cwd=root, check=False)
+    if r.returncode == 0:
+        return os.path.normpath(r.stdout.strip())
+    p = git("rev-parse", "--git-path", rel, cwd=root).stdout.strip()
+    if not os.path.isabs(p):
+        p = os.path.join(root, p)
+    return os.path.normpath(p)
+
+
 def has_remote(root):
     return git("remote", "get-url", "origin", cwd=root, check=False).returncode == 0
 
@@ -2665,7 +2681,7 @@ def cmd_init(args):
     write_cache(root, scope, branch)
     # immediate local ignore, without dirtying any branch (.dev/ and TASKS.md
     # match any depth — product-local paths are covered)
-    exclude = os.path.join(root, ".git", "info", "exclude")
+    exclude = git_path(root, "info/exclude")
     existing = open(exclude).read() if os.path.exists(exclude) else ""
     with open(exclude, "a") as f:
         for line in (".dev/", "TASKS.md"):
