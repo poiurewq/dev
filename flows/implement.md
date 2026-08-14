@@ -86,14 +86,41 @@ single id. `/dev auto` stays one task per cycle.
 2. **Claim**: `TASKS claim <id>` (optional `--assignee`, `--branch`), which
    owns the whole branch/worktree/board setup and prints `workdir` (git
    worktree root) and `product` (where to edit — same as workdir on a root
-   board, `<workdir>/<scope>` on a scoped board). Idempotent if branch and
-   worktree already exist. Heed unfinished-deps warnings: stop and tell the
-   user unless told otherwise. (Multi-task batch: within-set deps — see
+   board, `<workdir>/<scope>` on a scoped board). An existing branch is
+   reused if it is at or ahead of origin/<integration>; an empty leftover
+   (no unique commits) is fast-forwarded. A leftover that has diverged is
+   a stop: surface the claim error, then show what is unique on that
+   leftover (`git log --oneline origin/<integration>..<name>` and
+   `git diff --stat origin/<integration>...<name>`) plus leftover
+   worktree dirty status (`git status --porcelain` in that worktree, if
+   any) and ask keep vs throw away (throw-away closes any open PR
+   with `gh pr close`, then deletes the leftover). Do not write
+   `branch:` before the user chooses.
+   **Keep:** if the leftover worktree is dirty, commit or stash first
+   (`TASKS restack` refuses dirty). Then `TASKS update <id> --branch
+   <name>` only if the task has no `branch:` (needed after un-claim
+   cleared it; restack only reads the task file), then `TASKS restack
+   --ids <id> --onto origin/<integration>`, then `TASKS claim <id>`
+   again.
+   **Throw away:** refuse if the leftover worktree is dirty (same as
+   `TASKS cleanup` — do not force-wipe uncommitted work). Otherwise
+   `gh pr close` any open PR on that head (`gh pr list --head <name>
+   --state open` — `git push origin --delete` does not close it, and
+   the next claim recreates the same name so the old PR would
+   reattach), then delete the leftover (worktree if any, local branch,
+   and `git push origin --delete <name>` if the remote branch exists —
+   otherwise the next claim recreates it and refuses again) and re-claim.
+   `TASKS cleanup` will not drop the branch without a merged PR.
+   Heed unfinished-deps warnings: stop and tell the user unless told
+   otherwise. (Multi-task batch: within-set deps — see
    `flows/implement-batch.md`.) Do **not** hand-roll `git branch` /
-   `git worktree add` / board `update`.
+   `git worktree add` / board `update`. The one exception is the
+   throw-away leftover delete above (`gh pr close`, `git worktree
+   remove`, local branch delete, `git push origin --delete <name>`).
 
 3. **Branch**: already done by `claim`. Confirm you are in the printed
-   `product` dir on the task branch before editing.
+   `product` dir on the task branch, and that the printed `base:` is the
+   origin/integration ref you expect (claim verifies it; do not assume).
 
 4. **Implement.** Match existing conventions. **Design forks — surface,
    don't decide**: where the task is silent on a choice that repo conventions

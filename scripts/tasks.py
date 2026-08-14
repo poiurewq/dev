@@ -114,6 +114,12 @@ def ref_exists(root, ref):
     return git("rev-parse", "--verify", "--quiet", ref, cwd=root, check=False).returncode == 0
 
 
+def is_ancestor(root, maybe_anc, ref):
+    """True if maybe_anc is an ancestor of ref (equal counts)."""
+    r = git("merge-base", "--is-ancestor", maybe_anc, ref, cwd=root, check=False)
+    return r.returncode == 0
+
+
 def tdir(scope):
     """Board dir relative to repo root ('.tasks' or '<scope>/.tasks')."""
     return os.path.normpath(os.path.join(scope, TASKS_DIR))
@@ -678,20 +684,73 @@ def task_worktree_path(root, scope, tid, title):
     return os.path.join(product_root(root, scope), ".dev", "worktrees", name)
 
 
+def ff_task_branch(root, branch, start_ref):
+    """Fast-forward `branch` to start_ref. Caller must have checked ancestry."""
+    checkout = branch_checkout_cwd(root, branch)
+    if checkout:
+        if worktree_is_dirty(checkout):
+            sys.exit(f"error: task branch '{branch}' is behind {start_ref} "
+                     f"but worktree is dirty; commit/stash or reset first:"
+                     f"\n{checkout}")
+        r = git("merge", "--ff-only", start_ref, cwd=checkout, check=False)
+        if r.returncode != 0:
+            err = (r.stderr or r.stdout or "").strip()
+            sys.exit(f"error: could not fast-forward '{branch}' to "
+                     f"{start_ref}:\n{err}")
+    else:
+        r = git("branch", "-f", branch, start_ref, cwd=root, check=False)
+        if r.returncode != 0:
+            err = (r.stderr or r.stdout or "").strip()
+            sys.exit(f"error: could not fast-forward '{branch}' to "
+                     f"{start_ref}:\n{err}")
+    print(f"note: fast-forwarded leftover '{branch}' to {start_ref}")
+
+
 def ensure_task_branch(root, branch, start_ref):
-    """Create local task branch from start_ref if missing; no checkout."""
-    if ref_exists(root, f"refs/heads/{branch}"):
-        return
-    if ref_exists(root, f"origin/{branch}"):
-        git("branch", "--track", branch, f"origin/{branch}", cwd=root,
-            check=False)
-        if ref_exists(root, f"refs/heads/{branch}"):
-            return
-        git("branch", branch, f"origin/{branch}", cwd=root)
-        return
+    """Create local task branch from start_ref if missing; no checkout.
+
+    An existing branch is reused only when start_ref is already an ancestor
+    of its tip (at or ahead of the intended base). An empty leftover (the
+    branch is a strict ancestor of start_ref) is fast-forwarded. A leftover
+    that has diverged is an error — recovery is in flows/implement.md
+    (show unique commits and leftover dirty status, ask keep vs throw;
+    do not write branch: first; keep: commit/stash if dirty; refuse
+    throw-away while dirty; throw-away: gh pr close then delete).
+    """
     if not ref_exists(root, start_ref):
         sys.exit(f"error: start ref '{start_ref}' not found; fetch origin first")
-    git("branch", branch, start_ref, cwd=root)
+
+    if not ref_exists(root, f"refs/heads/{branch}"):
+        if ref_exists(root, f"origin/{branch}"):
+            git("branch", "--track", branch, f"origin/{branch}", cwd=root,
+                check=False)
+            if not ref_exists(root, f"refs/heads/{branch}"):
+                git("branch", branch, f"origin/{branch}", cwd=root)
+        else:
+            git("branch", branch, start_ref, cwd=root)
+            return
+
+    if is_ancestor(root, start_ref, branch):
+        return
+    if is_ancestor(root, branch, start_ref):
+        ff_task_branch(root, branch, start_ref)
+        return
+    ahead = git("rev-list", "--count", f"{start_ref}..{branch}",
+                cwd=root, check=False).stdout.strip() or "?"
+    behind = git("rev-list", "--count", f"{branch}..{start_ref}",
+                 cwd=root, check=False).stdout.strip() or "?"
+    sys.exit(f"error: task branch '{branch}' has diverged from {start_ref} "
+             f"({ahead} unique, {behind} behind); show unique commits and "
+             f"leftover dirty status and ask keep vs throw before writing "
+             f"branch: (flows/implement.md)")
+
+
+def verified_claim_base(root, branch, start_ref):
+    """start_ref if it is an ancestor of branch; else refuse to name a base."""
+    if not is_ancestor(root, start_ref, branch):
+        sys.exit(f"error: task branch '{branch}' is not based on {start_ref}; "
+                 f"refusing to report an unverified base")
+    return start_ref
 
 
 def free_task_branch_from_primary(root, branch, integration):
@@ -1509,7 +1568,9 @@ def identity_or_exit(root, scope):
 def cmd_claim(args):
     """Implement claim/setup: branch from origin/integration, always a
     linked worktree under .dev/worktrees (primary stays on integration as
-    hub), record branch + doing + assignee. Idempotent resume.
+    hub), record branch + doing + assignee. Resume reuses a branch that is
+    at or ahead of origin/integration; empty leftovers are fast-forwarded;
+    diverged leftovers error. Printed base is verified.
     """
     root, scope, integration, bw = ctx()
     meta = find_task(bw, scope, args.id)
@@ -1550,6 +1611,7 @@ def cmd_claim(args):
     ensure_task_branch(root, branch, start)
     ready = resolve_task_ready_path(
         root, scope, tid, meta["title"], branch, integration)
+    base = verified_claim_base(root, branch, start)
 
     # Refresh meta after git work (board may have moved on shared integration).
     integration, bw = resolve_board(root, scope)
@@ -1577,7 +1639,7 @@ def cmd_claim(args):
     print(f"  branch:  {branch}")
     print(f"  workdir: {ready}")
     print(f"  product: {product_root(ready, scope)}")
-    print(f"  base:    origin/{integration}")
+    print(f"  base:    {base}")
 
 
 # ---------- ship (implement: commit, push, open PR) ----------

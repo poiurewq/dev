@@ -60,11 +60,13 @@ TASKS iteration-land [--create-only] [--title T] [--body B]
                                         # open/merge iteration PR into parent
                                         # with merge commit (not squash)
 TASKS claim <id> [--assignee <who>] [--branch <b>]
-                                        # branch from origin/integration,
-                                        # always a linked worktree under
-                                        # .dev/worktrees (primary stays hub),
-                                        # status=doing; prints workdir +
-                                        # product (edit in product)
+                                        # branch from origin/integration
+                                        # (ff empty leftover; refuse if
+                                        # diverged), always a linked
+                                        # worktree under .dev/worktrees
+                                        # (primary stays hub), status=doing;
+                                        # prints workdir + product + verified
+                                        # base (edit in product)
 TASKS ship <id> --shipped "<what actually shipped>"
                 [--message M] [--title T] [--body B]
                 [--version-intent <intent>] [--base <branch>]
