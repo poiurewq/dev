@@ -33,15 +33,19 @@ import tempfile
 import time
 
 STATUSES = ["proposed", "backlog", "planned", "doing", "review", "done",
-            "not-planned"]
-# Statuses a task can rest in forever: they don't block an iteration close.
-TERMINAL = ("done", "not-planned")
-STATUS_LABEL = {"not-planned": "Not planned"}
+            "later", "not-planned"]
+# Don't block an iteration close. later is parked (reseeds on iteration-new),
+# not finished — but close treats it like not-planned.
+TERMINAL = ("done", "later", "not-planned")
+# Out of umbrella progress (not done, not this iteration).
+OUT_OF_PLAY = ("later", "not-planned")
+STATUS_LABEL = {"not-planned": "Not planned", "later": "Later"}
 TASKS_DIR = ".tasks"
 # On-disk board schema. Bump when board.yml / task frontmatter / .tasks layout
 # changes in a way future scripts must detect. Missing schema_version on disk
 # means 0 (pre-stamp boards). Never downgrade a higher version on write.
-SCHEMA_VERSION = 1
+# 2: later is a valid task status (additive; older readers ignore unknown).
+SCHEMA_VERSION = 2
 CONFIG_KEYS = ["schema_version", "integration_branch", "parent_branch",
                "iteration", "integrator", "contributors"]
 SETTABLE_KEYS = ["parent_branch", "integrator", "iteration"]
@@ -576,16 +580,21 @@ def covered_by_umbrellas(tasks):
 def umbrella_rollup(umbrella, tasks):
     """Short status rollup over membership leaves (not ordering-only deps).
 
-    not-planned leaves are out of scope: excluded from both the done
-    numerator and the denominator, and omitted from open status counts.
+    later and not-planned leaves are out of scope: excluded from both the
+    done numerator and the denominator, and omitted from open status counts.
     """
     by_id = {t["id"]: t for t in tasks}
     leaves = membership_leaves(umbrella, by_id)
-    # Progress is over work still in play — drop not-planned entirely.
-    active = [t for t in leaves if t["status"] != "not-planned"]
+    # Progress is over work still in play — drop later / not-planned.
+    active = [t for t in leaves if t["status"] not in OUT_OF_PLAY]
     if not active:
         if leaves:
-            return "☂ all not-planned"
+            parked = {t["status"] for t in leaves if t["status"] in OUT_OF_PLAY}
+            if parked == {"later"}:
+                return "☂ all later"
+            if parked == {"not-planned"}:
+                return "☂ all not-planned"
+            return "☂ all later/not-planned"
         return "☂ no children"
     n = len(active)
     done = sum(1 for t in active if t["status"] == "done")
@@ -601,7 +610,7 @@ def umbrella_rollup(umbrella, tasks):
         if t["status"] == "done":
             continue
         counts[t["status"]] = counts.get(t["status"], 0) + 1
-    order = [s for s in STATUSES if s != "done" and s != "not-planned"]
+    order = [s for s in STATUSES if s != "done" and s not in OUT_OF_PLAY]
     parts = [f"☂ {done}/{n} done"]
     for s in order:
         if counts.get(s):
@@ -629,6 +638,11 @@ def find_task(bw, scope, tid):
 
 def split_areas(s):
     return [a.strip() for a in s.split(",") if a.strip()]
+
+
+def occupies_area(t):
+    # later still occupies (intended work); not-planned is historical only.
+    return t["status"] not in ("done", "not-planned")
 
 
 def append_body(body, text):
@@ -994,7 +1008,15 @@ def sync_task_branch_from_remote(root, branch):
         git("branch", "-f", branch, remote, cwd=root)
 
 
-def _rebase_in_existing_checkout(root, branch, upstream, checkout):
+def _rebase_argv(upstream, old_base=None):
+    """git rebase args: exclude old_base commits when destacking a child."""
+    if old_base:
+        return ["rebase", "--onto", upstream, old_base]
+    return ["rebase", upstream]
+
+
+def _rebase_in_existing_checkout(root, branch, upstream, checkout,
+                                 old_base=None):
     """Rebase where `branch` is already checked out (task worktree or primary)."""
     dirty = git("status", "--porcelain", cwd=checkout,
                 check=False).stdout.strip()
@@ -1002,18 +1024,19 @@ def _rebase_in_existing_checkout(root, branch, upstream, checkout):
         sys.exit(f"error: task worktree has uncommitted changes; "
                  f"commit or stash first:\n{checkout}")
     before = git("rev-parse", branch, cwd=root).stdout.strip()
-    r = git("rebase", upstream, cwd=checkout, check=False)
+    r = git(*_rebase_argv(upstream, old_base), cwd=checkout, check=False)
     if r.returncode != 0:
         git("rebase", "--abort", cwd=checkout, check=False)
         err = (r.stderr or r.stdout or "").strip()
-        sys.exit(f"error: rebase of '{branch}' onto {upstream} failed "
+        onto = f"{upstream} (excluding {old_base})" if old_base else upstream
+        sys.exit(f"error: rebase of '{branch}' onto {onto} failed "
                  f"(conflicts?). Resolve in {checkout}, then re-run "
                  f"land or restack.\n{err}")
     after = git("rev-parse", branch, cwd=root).stdout.strip()
     return before != after
 
 
-def _rebase_via_temp_worktree(root, branch, upstream):
+def _rebase_via_temp_worktree(root, branch, upstream, old_base=None):
     """Rebase without touching the primary clone's checked-out branch.
 
     Uses a detached temp worktree, then points `branch` at the new tip via
@@ -1029,11 +1052,12 @@ def _rebase_via_temp_worktree(root, branch, upstream):
             err = (r.stderr or r.stdout or "").strip()
             sys.exit(f"error: could not create temp worktree to rebase "
                      f"'{branch}':\n{err}")
-        r = git("rebase", upstream, cwd=tmp, check=False)
+        r = git(*_rebase_argv(upstream, old_base), cwd=tmp, check=False)
         if r.returncode != 0:
             git("rebase", "--abort", cwd=tmp, check=False)
             err = (r.stderr or r.stdout or "").strip()
-            sys.exit(f"error: rebase of '{branch}' onto {upstream} failed "
+            onto = f"{upstream} (excluding {old_base})" if old_base else upstream
+            sys.exit(f"error: rebase of '{branch}' onto {onto} failed "
                      f"(conflicts?). Fetch/rebase the task branch, resolve, "
                      f"push, then re-run land or restack.\n{err}")
         new = git("rev-parse", "HEAD", cwd=tmp).stdout.strip()
@@ -1065,13 +1089,20 @@ def _rebase_via_temp_worktree(root, branch, upstream):
         git("worktree", "prune", cwd=root, check=False)
 
 
-def rebase_task_onto_ref(root, branch, upstream):
+def rebase_task_onto_ref(root, branch, upstream, old_base=None):
     """Rebase task branch onto upstream ref. Returns True if rewritten.
 
     Force-push is the caller's job when True. Conflicts abort and exit.
     Rebases in the existing checkout if the branch is already checked out;
     otherwise uses a temp worktree so the primary clone is never switched
     onto the task branch solely for the rebase. Never rewrites integration.
+
+    old_base, when set, is the tip to exclude (`git rebase --onto upstream
+    old_base`) so a squash-merged stack parent is not replayed. Do not skip
+    when old_base is not an ancestor: the parent may have moved ahead of
+    the child. Already-destacked is a no-op (`rebase --onto` reports up to
+    date). Do not use behind==0 for destack: a stacked child usually
+    already contains integration.
     """
     if not ref_exists(root, upstream):
         # Try origin/<name> if bare branch name given
@@ -1080,20 +1111,287 @@ def rebase_task_onto_ref(root, branch, upstream):
             upstream = f"origin/{upstream}"
         elif not ref_exists(root, upstream):
             sys.exit(f"error: upstream '{upstream}' missing after fetch")
+    old_base = resolve_rebase_exclude(root, old_base)
     sync_task_branch_from_remote(root, branch)
-    behind = git("rev-list", "--count", f"{branch}..{upstream}",
-                 cwd=root).stdout.strip()
-    if behind == "0":
-        return False
+    if not old_base:
+        behind = git("rev-list", "--count", f"{branch}..{upstream}",
+                     cwd=root).stdout.strip()
+        if behind == "0":
+            return False
     checkout = branch_checkout_cwd(root, branch)
     if checkout:
-        return _rebase_in_existing_checkout(root, branch, upstream, checkout)
-    return _rebase_via_temp_worktree(root, branch, upstream)
+        return _rebase_in_existing_checkout(
+            root, branch, upstream, checkout, old_base=old_base)
+    return _rebase_via_temp_worktree(
+        root, branch, upstream, old_base=old_base)
+
+
+def resolve_rebase_exclude(root, old_base):
+    """Resolve a destack exclude ref (SHA, branch, or origin/<branch>)."""
+    if not old_base:
+        return None
+    old_base = str(old_base).strip()
+    if not old_base:
+        return None
+    if ref_exists(root, old_base):
+        return git("rev-parse", old_base, cwd=root).stdout.strip()
+    if not old_base.startswith("origin/") and ref_exists(
+            root, f"origin/{old_base}"):
+        return git("rev-parse", f"origin/{old_base}", cwd=root).stdout.strip()
+    sys.exit(f"error: destack exclude '{old_base}' missing after fetch")
+
+
+def ref_short_name(ref):
+    """Branch name without origin/ prefix."""
+    ref = (ref or "").strip()
+    if ref.startswith("origin/"):
+        return ref[len("origin/"):]
+    return ref
 
 
 def rebase_task_onto_integration(root, branch, integration):
     """Rebase task branch onto origin/<integration>. Returns True if rewritten."""
     return rebase_task_onto_ref(root, branch, f"origin/{integration}")
+
+
+def open_prs_based_on(root, base_branch):
+    """Open PRs whose GitHub base is base_branch. Paginates; no hard cap."""
+    r = gh("api", "--method", "GET", "--paginate",
+           "--jq",
+           ".[] | {url: .html_url, headRefName: .head.ref, "
+           "baseRefName: .base.ref}",
+           "repos/{owner}/{repo}/pulls",
+           "-f", "state=open",
+           "-f", f"base={base_branch}",
+           "-F", "per_page=100",
+           cwd=root, check=False)
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "").strip()
+        sys.exit(f"error: could not list PRs based on '{base_branch}':\n{err}")
+    out = []
+    for line in (r.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            sys.exit(f"error: could not parse PR list for base '{base_branch}'")
+        head = (item.get("headRefName") or "").strip()
+        url = (item.get("url") or "").strip()
+        base = (item.get("baseRefName") or "").strip() or base_branch
+        if head and url:
+            out.append({"url": url, "head": head, "base": base})
+    return out
+
+
+def _fetch_origin_refs(root, names):
+    """Fetch several origin refs in a few calls (no per-ref round trip).
+
+    If a batch fails (one missing ref fails the whole fetch), retry each
+    name so the others still update.
+    """
+    refs, seen = [], set()
+    for n in names:
+        n = (n or "").strip()
+        if n and n not in seen:
+            seen.add(n)
+            refs.append(n)
+    chunk = 50
+    for i in range(0, len(refs), chunk):
+        batch = refs[i:i + chunk]
+        r = git("fetch", "origin", *batch, cwd=root, check=False)
+        if r.returncode != 0 and len(batch) > 1:
+            for ref in batch:
+                git("fetch", "origin", ref, cwd=root, check=False)
+
+
+def resolve_branch_tip(root, name):
+    """SHA of origin/<name> or local name, or None."""
+    if not name:
+        return None
+    for cand in (f"origin/{name}", name):
+        if ref_exists(root, cand):
+            return git("rev-parse", cand, cwd=root).stdout.strip()
+    return None
+
+
+def collect_stack_on(root, parent_branch, integration):
+    """Immediate children of parent_branch plus deeper descendants.
+
+    Immediate: open PRs with GitHub base=parent, plus (retry after retarget)
+    open PRs based on integration whose head still has the parent tip as
+    ancestor — those heads are fetched first. Descendants: BFS via GitHub
+    base from those heads — not flattened onto integration.
+    """
+    git("fetch", "origin", parent_branch, cwd=root, check=False)
+    parent_sha = resolve_branch_tip(root, parent_branch)
+    immediate = {}
+    for pr in open_prs_based_on(root, parent_branch):
+        if pr["head"] != parent_branch:
+            immediate[pr["head"]] = pr
+    if parent_sha:
+        extra = []
+        for pr in open_prs_based_on(root, integration):
+            head = pr["head"]
+            if head in (parent_branch, integration) or head in immediate:
+                continue
+            extra.append(pr)
+        _fetch_origin_refs(root, [pr["head"] for pr in extra])
+        for pr in extra:
+            tip = resolve_branch_tip(root, pr["head"])
+            if tip and is_ancestor(root, parent_sha, tip):
+                immediate[pr["head"]] = pr
+    descendants = []
+    seen = {parent_branch, *immediate}
+    queue = list(immediate)
+    while queue:
+        b = queue.pop(0)
+        for pr in open_prs_based_on(root, b):
+            if pr["head"] in seen or pr["head"] == parent_branch:
+                continue
+            seen.add(pr["head"])
+            descendants.append(pr)
+            queue.append(pr["head"])
+    names = {parent_branch}
+    for pr in list(immediate.values()) + descendants:
+        names.add(pr["head"])
+        names.add(pr["base"])
+    _fetch_origin_refs(root, names)
+    tips = {}
+    for name in names:
+        tip = resolve_branch_tip(root, name)
+        if tip:
+            tips[name] = tip
+    if parent_branch in tips:
+        parent_sha = tips[parent_branch]
+    return {
+        "parent": parent_branch,
+        "parent_sha": parent_sha,
+        "immediate": list(immediate.values()),
+        "descendants": descendants,
+        "tips": tips,
+    }
+
+
+def destack_prepare(root, parent_branch, integration):
+    """Snapshot the stack; retarget immediate children to integration.
+
+    Call before the parent is rewritten or merged so auto-delete cannot
+    close them and retry can still see the parent tip they sit on.
+    Fail-closed: a retarget error does not rewrite or merge parent.
+    """
+    snap = collect_stack_on(root, parent_branch, integration)
+    for pr in snap["immediate"]:
+        if pr["base"] == integration:
+            continue
+        url, base = pr["url"], pr["base"]
+        print(f"  retarget {pr['head']} {base} → {integration} (before merge)")
+        r = gh("pr", "edit", url, "--base", integration, cwd=root, check=False)
+        if r.returncode != 0:
+            err = (r.stderr or r.stdout or "").strip()
+            sys.exit(f"error: destack: could not retarget {url} to "
+                     f"{integration}; not merging or deleting "
+                     f"'{parent_branch}'\n{err}")
+        pr["base"] = integration
+    return snap
+
+
+def _restore_destack_locals(root, branches, tips):
+    """Point destack-rewritten local refs back at snapshot tips."""
+    for branch in branches:
+        sha = (tips or {}).get(branch)
+        if not sha:
+            continue
+        print(f"  destack failed; restoring local '{branch}' to {sha[:12]}")
+        checkout = branch_checkout_cwd(root, branch)
+        if checkout:
+            dirty = git("status", "--porcelain", cwd=checkout,
+                        check=False).stdout.strip()
+            if dirty:
+                print(f"  destack failed; '{branch}' worktree dirty, "
+                      f"not restoring:\n{checkout}")
+                continue
+            git("reset", "--hard", sha, cwd=checkout, check=False)
+        elif ref_exists(root, f"refs/heads/{branch}"):
+            git("branch", "-f", branch, sha, cwd=root, check=False)
+
+
+def _restore_destack_origin(root, branches, tips):
+    """Force-push snapshot tips for destack heads already pushed."""
+    for branch in branches:
+        sha = (tips or {}).get(branch)
+        if not sha:
+            continue
+        print(f"  destack failed; restoring origin/{branch} to {sha[:12]}")
+        r = git("push", "--force-with-lease", "origin",
+                f"{sha}:refs/heads/{branch}", cwd=root, check=False)
+        if r.returncode != 0:
+            err = (r.stderr or r.stdout or "").strip()
+            print(f"  destack failed; could not restore origin/{branch}:"
+                  f"\n{err}")
+
+
+def destack_finish(root, integration, snap):
+    """Destack immediate children; restack deeper descendants.
+
+    Call while origin/<parent> is still the tip children sit on — before
+    land rebases or merges the parent. Immediate children rebase --onto
+    integration <parent-tip>. Deeper descendants rebase onto their
+    rewritten stack parent (exclude that parent's old tip). Does not
+    flatten the stack onto integration.
+    Rebases the whole snapshot, then pushes; on error, restores origin
+    (already-pushed heads) and local rewritten refs to the snapshot tips
+    so a re-run sees the original graph. Fail-closed: do not rewrite or
+    merge the parent on error.
+    """
+    parent_branch = snap["parent"]
+    parent_sha = snap["parent_sha"]
+    immediate = snap["immediate"]
+    descendants = snap["descendants"]
+    tips = snap["tips"]
+    if not immediate and not descendants:
+        return
+    if not parent_sha:
+        sys.exit(f"error: destack: parent '{parent_branch}' has no ref; "
+                 f"not rewriting or merging '{parent_branch}'")
+    r = git("fetch", "origin", integration, cwd=root, check=False)
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "").strip()
+        sys.exit(f"error: destack: could not fetch origin/{integration}; "
+                 f"not rewriting or merging '{parent_branch}'\n{err}")
+    up = f"origin/{integration}"
+    rewritten = []
+    pushed = []
+    try:
+        if immediate:
+            print(f"  destacking {len(immediate)} immediate PR(s) onto "
+                  f"{integration}")
+        for pr in immediate:
+            head = pr["head"]
+            print(f"  destack {head} onto {up} (excluding {parent_sha[:12]})")
+            if rebase_task_onto_ref(root, head, up, old_base=parent_sha):
+                rewritten.append(head)
+        if descendants:
+            print(f"  restacking {len(descendants)} descendant PR(s) onto "
+                  f"rewritten parents")
+        for pr in descendants:
+            head, base, url = pr["head"], pr["base"], pr["url"]
+            old_sha = tips.get(base)
+            if not old_sha:
+                sys.exit(f"error: destack: old base '{base}' of {url} has no "
+                         f"ref; not rewriting or merging '{parent_branch}'")
+            print(f"  restack {head} onto {base} (excluding {old_sha[:12]})")
+            if rebase_task_onto_ref(root, head, base, old_base=old_sha):
+                rewritten.append(head)
+        for pr in list(immediate) + list(descendants):
+            head = pr["head"]
+            push_task_branch(root, head, force=head in rewritten)
+            pushed.append(head)
+    except SystemExit:
+        _restore_destack_origin(root, pushed, tips)
+        _restore_destack_locals(root, rewritten, tips)
+        raise
 
 
 def push_task_branch(root, branch, force=False):
@@ -1438,8 +1736,15 @@ def cmd_cleanup(args):
 
 
 def cmd_land(args):
-    """Post-approval land: rebase if needed, merge PR, cleanup, mark done.
+    """Post-approval land: destack children, rebase if needed, merge, cleanup.
 
+    Destacks first, while origin/<parent> is still the tip children sit on:
+    retarget immediate children to integration, destack them onto
+    integration (child-unique), restack deeper descendants onto the
+    rewritten parents — does not flatten the stack. Then rebases and
+    merges the parent and deletes the parent branch. Already-merged destacks
+    (no-op when children are already destacked). Already-done is cleanup
+    only.
     Does not approve the PR. Surfaces Version intent from the PR body only —
     product version file edits stay with the merger / product docs.
     """
@@ -1448,8 +1753,8 @@ def cmd_land(args):
     tid = meta["id"]
     pr = (meta.get("pr") or "").strip()
 
-    if meta["status"] == "not-planned":
-        sys.exit(f"error: T{tid} is not-planned; revive before landing")
+    if meta["status"] in ("not-planned", "later"):
+        sys.exit(f"error: T{tid} is {meta['status']}; revive before landing")
     if meta["status"] == "done":
         print(f"T{tid}: already done — running cleanup only")
         branch = task_branch_name(meta)
@@ -1478,13 +1783,16 @@ def cmd_land(args):
 
     if pr_is_merged(info):
         print(f"T{tid}: PR already merged — marking done and cleaning up")
+        snap = destack_prepare(root, branch, integration)
+        destack_finish(root, integration, snap)
         mark_task_done(root, scope, integration, bw, meta)
         # Re-read meta so status=done is visible; cleanup still keys off PR.
         meta = find_task(bw, scope, tid)
         cleanup_task_artifacts(root, scope, meta, branch)
         if intent and intent.lower() != "none":
-            print(f"note: Version intent is '{intent}' — apply the bump on "
-                  f"'{integration}' per product versioning docs")
+            print(f"note: Version intent is '{intent}' — apply one bump "
+                  f"on '{integration}' when this set is done (per product "
+                  f"versioning docs)")
         print(f"T{tid}: done")
         return
 
@@ -1501,6 +1809,10 @@ def cmd_land(args):
 
     git("fetch", "origin", integration, cwd=root, check=False)
     git("fetch", "origin", branch, cwd=root, check=False)
+    # Destack while origin/<parent> is still the tip children sit on.
+    # Then rebase/merge the parent. A re-run can rediscover via ancestry.
+    snap = destack_prepare(root, branch, integration)
+    destack_finish(root, integration, snap)
 
     rewritten = rebase_task_onto_integration(root, branch, integration)
     if rewritten:
@@ -1565,8 +1877,9 @@ def cmd_land(args):
     meta = find_task(bw, scope, tid)
     cleanup_task_artifacts(root, scope, meta, branch)
     if intent and intent.lower() != "none":
-        print(f"note: Version intent is '{intent}' — apply the bump on "
-              f"'{integration}' per product versioning docs")
+        print(f"note: Version intent is '{intent}' — apply one bump "
+              f"on '{integration}' when this set is done (per product "
+              f"versioning docs)")
     print(f"T{tid}: landed and done")
 
 
@@ -1593,7 +1906,7 @@ def cmd_claim(args):
     tid = meta["id"]
     status = meta["status"]
 
-    if status in ("done", "not-planned"):
+    if status in ("done", "later", "not-planned"):
         sys.exit(f"error: T{tid} is {status}; cannot claim")
     if status == "proposed":
         sys.exit(f"error: T{tid} is proposed; approve via review before claim")
@@ -1730,6 +2043,62 @@ def ship_work_cwd(root, scope, meta, branch):
               f"<scope>/.dev/worktrees/); prefer the claim workdir",
               file=sys.stderr)
     return work
+
+
+def cmd_diff(args):
+    """Self-review: location + diff from the task worktree, not session cwd."""
+    root, scope, integration, bw = ctx()
+    meta = find_task(bw, scope, args.id)
+    tid = meta["id"]
+    branch = task_branch_name(meta)
+    if not branch:
+        sys.exit(f"error: T{tid} has no branch; run claim first")
+    work = ship_work_cwd(root, scope, meta, branch)
+    base = f"origin/{integration}"
+    if not ref_exists(root, base):
+        base = integration
+        if not ref_exists(root, base):
+            sys.exit(f"error: no {base} to diff against")
+
+    print(f"T{tid}: diff")
+    print(f"  workdir: {work}")
+    print(f"  product: {product_root(work, scope)}")
+    print(f"  branch:  {branch}")
+    print(f"  base:    {base}")
+
+    st = git("status", "--porcelain", cwd=work, check=False)
+    if st.returncode != 0:
+        err = (st.stderr or st.stdout or "").strip()
+        sys.exit(f"error: git status failed in {work}:\n{err}")
+    porcelain = st.stdout or ""
+    if porcelain.strip():
+        print("uncommitted:")
+        sys.stdout.write(porcelain)
+        if not porcelain.endswith("\n"):
+            sys.stdout.write("\n")
+        tracked = git("diff", "HEAD", cwd=work, check=False)
+        if tracked.returncode != 0:
+            err = (tracked.stderr or tracked.stdout or "").strip()
+            sys.exit(f"error: git diff HEAD failed in {work}:\n{err}")
+        if (tracked.stdout or "").strip():
+            sys.stdout.write(tracked.stdout)
+            if not tracked.stdout.endswith("\n"):
+                sys.stdout.write("\n")
+    else:
+        print("uncommitted: (none)")
+
+    print(f"vs {base}:")
+    r = git("diff", f"{base}...HEAD", cwd=work, check=False)
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "").strip()
+        sys.exit(f"error: git diff {base}...HEAD failed:\n{err}")
+    out = r.stdout or ""
+    if out.strip():
+        sys.stdout.write(out)
+        if not out.endswith("\n"):
+            sys.stdout.write("\n")
+    else:
+        print("(none)")
 
 
 def commits_ahead(root, branch, base_ref):
@@ -2040,6 +2409,8 @@ def cmd_restack(args):
     base (land-safe default); --onto / --retarget still force retarget.
     --onto rebases every target onto that ref (does not cascade children
     onto restacked parents); omit it to preserve in-set stack parents.
+    Destacking onto a different ref uses `rebase --onto` excluding the old
+    PR base tip so a squash-merged parent is not replayed.
     """
     root, scope, integration, bw = ctx()
     ids = parse_id_list(args.ids or "")
@@ -2111,12 +2482,16 @@ def cmd_restack(args):
                 and old_base and old_base != integration):
             want_retarget = True
         planned_new_base = new_base_for_pr if want_retarget else old_base
+        exclude = ""
+        if old_base and ref_short_name(old_base) != ref_short_name(upstream):
+            exclude = old_base
         plan.append({
             "id": tid,
             "branch": branch,
             "upstream": upstream,
             "pr": inf["pr"],
             "old_base": old_base,
+            "exclude": exclude,
             "new_base": planned_new_base,
             "retarget": want_retarget and old_base != planned_new_base,
         })
@@ -2124,7 +2499,9 @@ def cmd_restack(args):
     print("restack plan:")
     for step in plan:
         rflag = f" retarget-base→{step['new_base']}" if step.get("retarget") else ""
-        print(f"  T{step['id']}: {step['branch']} onto {step['upstream']}{rflag}")
+        xflag = f" excluding {step['exclude']}" if step.get("exclude") else ""
+        print(f"  T{step['id']}: {step['branch']} onto {step['upstream']}"
+              f"{xflag}{rflag}")
     if dry:
         print("restack: dry-run only (no changes)")
         return
@@ -2138,9 +2515,12 @@ def cmd_restack(args):
         if checkout and worktree_is_dirty(checkout):
             sys.exit(f"error: T{tid} worktree dirty at {checkout}; "
                      "commit/stash before restack")
-        print(f"restack T{tid}: rebase {branch} onto {upstream}…")
+        exclude = step.get("exclude") or None
+        onto = f"{upstream} (excluding {exclude})" if exclude else upstream
+        print(f"restack T{tid}: rebase {branch} onto {onto}…")
         try:
-            rewritten = rebase_task_onto_ref(root, branch, upstream)
+            rewritten = rebase_task_onto_ref(
+                root, branch, upstream, old_base=exclude)
         except SystemExit:
             raise
         if rewritten:
@@ -2174,7 +2554,7 @@ def cmd_ship(args):
     branch = task_branch_name(meta)
     if not branch:
         sys.exit(f"error: T{tid} has no branch; run claim first")
-    if meta["status"] in ("done", "not-planned", "proposed"):
+    if meta["status"] in ("done", "later", "not-planned", "proposed"):
         sys.exit(f"error: T{tid} is {meta['status']}; cannot ship")
 
     # A ship without a result record is what leaves the PR body a stale copy
@@ -2788,7 +3168,7 @@ def cmd_area(args):
     if args.action == "list":
         open_counts = {}
         for t in all_tasks(bw, scope):
-            if t["status"] != "done":
+            if occupies_area(t):
                 for a in split_areas(t.get("area", "")):
                     open_counts[a] = open_counts.get(a, 0) + 1
         for name, desc in mods.items():
@@ -2811,7 +3191,7 @@ def cmd_area(args):
         if name not in mods:
             sys.exit(f"error: no area '{name}'")
         refs = [t["id"] for t in all_tasks(bw, scope)
-                if name in split_areas(t.get("area", "")) and t["status"] != "done"]
+                if name in split_areas(t.get("area", "")) and occupies_area(t)]
         if refs and not args.force:
             sys.exit(f"error: open tasks still reference '{name}': "
                      f"{', '.join(f'T{i}' for i in refs)} (use --force to remove anyway)")
@@ -2979,7 +3359,7 @@ def fmt_line(t, tasks):
 
 
 def _board_task_line(t, tasks):
-    mark = {"done": "x", "not-planned": "~"}.get(t["status"], " ")
+    mark = {"done": "x", "not-planned": "~", "later": "-"}.get(t["status"], " ")
     return f"- [{mark}] {fmt_line(t, tasks)}"
 
 
@@ -2989,8 +3369,8 @@ def _board_by_status(tasks, covered):
         col = [t for t in tasks if t["status"] == status
                and t["id"] not in covered]
         # Column count: visible rows (collapsed view hides umbrella children).
-        if status == "not-planned" and not col:
-            continue  # no empty column for the exceptional case
+        if status in OUT_OF_PLAY and not col:
+            continue  # no empty column for parked / rejected
         label = STATUS_LABEL.get(status, status.capitalize())
         lines.append(f"## {label} ({len(col)})")
         for t in col:
@@ -3079,12 +3459,14 @@ def cmd_iteration(args):
     root, scope, branch, bw = ctx()
     cfg = read_board_cfg(bw, scope)
     tasks = all_tasks(bw, scope)
-    done = sum(1 for t in tasks if t["status"] == "done")
+    # later is parked: omit it from the X/Y done denominator.
+    in_play = [t for t in tasks if t["status"] != "later"]
+    done = sum(1 for t in in_play if t["status"] == "done")
     print(f"scope: {scope}")
     print(f"iteration: {cfg.get('iteration', '')}")
     print(f"integration_branch: {cfg.get('integration_branch', '')}")
     print(f"parent_branch: {cfg.get('parent_branch', '') or '(none)'}")
-    print(f"tasks: {done}/{len(tasks)} done")
+    print(f"tasks: {done}/{len(in_play)} done")
 
 
 def archive_dir(scope, iteration_name):
@@ -3110,6 +3492,63 @@ def archive_taken(bw, scope, iteration_name):
     return rel if os.path.isdir(d) and os.listdir(d) else None
 
 
+def archived_tasks(bw, scope, iteration_name):
+    """Parse task files from a closed iteration's archive dir (empty if none)."""
+    d = os.path.join(bw, archive_dir(scope, iteration_name))
+    if not os.path.isdir(d):
+        return []
+    paths = sorted(glob.glob(os.path.join(d, "[0-9][0-9][0-9].md")))
+    return [parse_task(p) for p in paths]
+
+
+def reseed_later_tasks(bw, scope, old_iteration):
+    """Copy archived later tasks onto the live board with fresh ids.
+
+    Only the named iteration's archive (the one just closed). Scanning every
+    archive would duplicate a task that stayed later across closes.
+    later→later deps are remapped; deps on anything else are dropped.
+    Returns [(new_meta, old_id), ...] in new-id order.
+    """
+    if not (old_iteration or "").strip():
+        return []
+    laters = [t for t in archived_tasks(bw, scope, old_iteration)
+              if t.get("status") == "later"]
+    if not laters:
+        return []
+    nid = max((t["id"] for t in all_tasks(bw, scope)), default=0) + 1
+    mapping = {}
+    for t in sorted(laters, key=lambda x: x["id"]):
+        mapping[t["id"]] = nid
+        nid += 1
+    written = []
+    today = datetime.date.today().isoformat()
+    for t in sorted(laters, key=lambda x: x["id"]):
+        new_id = mapping[t["id"]]
+        new_deps = [mapping[d] for d in t.get("deps", []) if d in mapping]
+        body = append_body(t.get("body") or "",
+                           f"carried from {old_iteration}/T{t['id']}")
+        meta = {
+            "id": new_id,
+            "title": t.get("title") or "",
+            "area": t.get("area") or "",
+            "status": "later",
+            "kind": t.get("kind") or "",
+            "assignee": "",
+            "branch": "",
+            "deps": new_deps,
+            "pr": "",
+            "needs": t.get("needs") or "",
+            "created": today,
+            "body": body,
+        }
+        path = os.path.join(bw, tdir(scope), f"{new_id:03d}.md")
+        with open(path, "w") as f:
+            f.write(render_task(meta))
+        meta["path"] = path
+        written.append((meta, t["id"]))
+    return written
+
+
 def cmd_iteration_close(args):
     """Archive task files under .tasks/archive/<iteration>/, index them in
     .tasks/log.md, and remove the live files, committing on the integration
@@ -3123,9 +3562,9 @@ def cmd_iteration_close(args):
     unfinished = [t for t in tasks if t["status"] not in TERMINAL]
     if unfinished and not args.force:
         ids = ", ".join(f"T{t['id']}" for t in unfinished)
-        sys.exit(f"error: unfinished tasks: {ids}. Finish them, delete them, "
-                 "or re-run with --force to close anyway (they will be logged "
-                 "as unfinished and removed).")
+        sys.exit(f"error: unfinished tasks: {ids}. Finish them, mark later, "
+                 "delete them, or re-run with --force to close anyway (they "
+                 "will be logged as unfinished and removed).")
     name = cfg.get("iteration", branch)
     today = datetime.date.today().isoformat()
     parent = cfg.get("parent_branch", "")
@@ -3150,6 +3589,8 @@ def cmd_iteration_close(args):
             line += f" [{t['area']}]"
         if t["status"] == "not-planned":
             line += " [not planned]"
+        elif t["status"] == "later":
+            line += " [later]"
         elif t["status"] != "done":
             line += f" [unfinished: {t['status']}]"
         if t.get("pr"):
@@ -3181,6 +3622,7 @@ def cmd_iteration_close(args):
 def cmd_iteration_new(args):
     root, scope, old_branch, bw = ctx()
     cfg = read_board_cfg(bw, scope)
+    old_iteration = cfg.get("iteration") or ""
     parent = args.parent or cfg.get("parent_branch", "")
     if not parent:
         sys.exit("error: no parent branch known; pass --parent <branch>")
@@ -3228,6 +3670,7 @@ def cmd_iteration_new(args):
     cfg["iteration"] = name
     write_board_cfg(bw, scope, cfg)
     write_cache(root, scope, args.branch)
+    reseeded = reseed_later_tasks(bw, scope, old_iteration)
     board_commit(root, args.branch, bw, scope,
                  f"dev: start iteration {cfg['iteration']}")
     # leave a pointer on the parent so other contributors' stale checkouts
@@ -3239,6 +3682,10 @@ def cmd_iteration_new(args):
                  f"dev: point board at iteration {cfg['iteration']}")
     print(f"iteration '{cfg['iteration']}' started on new branch "
           f"'{args.branch}' (parent: {parent})")
+    if reseeded:
+        bits = ", ".join(f"T{m['id']} ← {old_iteration}/T{oid}"
+                         for m, oid in reseeded)
+        print(f"reseeded {len(reseeded)} later task(s): {bits}")
     print(f"note: switch your checkout when ready: git checkout {args.branch}")
 
 
@@ -3287,7 +3734,8 @@ def main():
     s.add_argument("--assignee")
     s.add_argument("--kind", default="",
                    help="optional kind (e.g. umbrella); empty = normal task")
-    s.add_argument("--status", choices=["proposed", "backlog", "planned"],
+    s.add_argument("--status",
+                   choices=["proposed", "backlog", "planned", "later"],
                    default="backlog")
     s.set_defaults(fn=cmd_add)
 
@@ -3361,6 +3809,11 @@ def main():
     s.add_argument("--branch",
                    help="task branch (default: recorded or dev/<scope?>-<id>-<slug>)")
     s.set_defaults(fn=cmd_claim)
+
+    s = sub.add_parser("diff",
+                       help="self-review: location + diff from the task worktree")
+    s.add_argument("id", type=int)
+    s.set_defaults(fn=cmd_diff)
 
     s = sub.add_parser("ship",
                        help="implement ship: commit [T<id>], push, open PR, status=review")

@@ -24,7 +24,7 @@ Run the steps below **before claiming anything**, then run
 2. **Eligibility (whole set).** Load each task and apply implement.md step
    0's **state preflight** to every member before claiming any. Refuse the
    whole batch if any member is not startable without a special user call —
-   `done`, `not-planned`, `proposed`, open `needs: decision`, assigned to
+   `done`, `not-planned`, `later`, `proposed`, open `needs: decision`, assigned to
    someone else, or already `review` (resume is single-task, not batch) —
    listing each ineligible id and why. Soft cases that only need confirmation
    in single-task (`doing`, pointless-looking) still require that
@@ -53,7 +53,8 @@ Run the steps below **before claiming anything**, then run
      one summary reused across the set).
      That writes `Dev-batch: …` on the PR body and task body so review can
      gate partial review and land the set together
-     (`flows/review-batch.md`).
+     (`flows/review-batch.md`). Per-PR `Version intent` is a suggestion;
+     review applies one bump sized for the whole set.
    - **Within-set deps:** when claim warns about unfinished deps that are
      earlier members of this batch (typically now `review` after their ship),
      proceed. Still stop if an unfinished dep is outside the set (shouldn't

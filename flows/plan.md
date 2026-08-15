@@ -23,9 +23,11 @@ body carries the goal.
    goal, body = the goal in a few sentences + interview takeaways, deps on
    all the subtasks, `kind: umbrella`, scope = "verify the goal is met
    end-to-end". Area-tag each task; a task may list several comma-separated
-   areas, and umbrellas often span areas — tag them with the union (or `all`
-   only if verification genuinely touches everything, since `all` waits for a
-   fully quiet board). Nested goals later can be umbrellas whose children
+   areas, and umbrellas often span areas. Tag an umbrella with a listed
+   path-parent when that parent covers every child area; otherwise the
+   children, not both. Use `all` only if verification genuinely touches
+   everything, since `all` waits for a fully quiet board (SKILL.md *Area
+   stewardship*). Nested goals later can be umbrellas whose children
    include other umbrellas; set `kind: umbrella` on each parent layer.
 
 3. **Check the board**: `TASKS related "<title + desc>"` per drafted task.

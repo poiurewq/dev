@@ -12,11 +12,12 @@ identity file, write the auto identity there so script defaults stay sane.
 Run from the product directory or pass `--scope`.
 
 **Hard limits**: never merge or approve a PR, resolve a `needs: decision`
-fork, flip `proposed` to `backlog`, mark a task `not-planned`, delete one, or
-otherwise decide for the human — a pointless-looking task gets `needs:
-decision` with your reasoning instead. Auto files work and questions; humans
-dispose of them via flows/review.md. Never park, discard, or reset the local
-integration branch — that is human-only (flows/implement.md preflight).
+fork, flip `proposed` to `backlog`, mark a task `not-planned` or `later`,
+delete one, or otherwise decide for the human — a pointless-looking task
+gets `needs: decision` with your reasoning instead. Auto files work and
+questions; humans dispose of them via flows/review.md. Never park, discard,
+or reset the local integration branch — that is human-only
+(flows/implement.md preflight).
 
 ## Cycle
 

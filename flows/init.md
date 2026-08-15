@@ -78,12 +78,16 @@ user add one before going further.
      > once (over-granularity → confusing multi-area tags).
      >
      > Prefer names that mirror the tree when the work splits by path:
-     > use a repo-relative path, or just the shortest uniquely
-     > distinguishing portion (e.g. `cli` if only one, `billing/api` when
-     > several `api` dirs exist). No trailing slashes and no leading
-     > `./`. Cross-cutting work that is not a directory still gets a short
-     > phrase (`docs`, `ci`). Areas can be added later when tasks start
-     > clustering.
+     > shortest unique path, no filename extensions (`billing/api`, not
+     > `billing/api.go`; `cli` if only one). A name with `/` is a path;
+     > parents are implied by segments. A parent listed in areas.md
+     > (`billing`) locks the whole subtree; tag that parent or the
+     > specific children, not both, and prefer children. One-offs go to
+     > `billing/other`, not the parent. Do not list a parent until you
+     > need the wide lock or it already has children. Cross-cutting work
+     > that is not a path still gets a short slash-free phrase (`docs`,
+     > `ci`). No trailing slashes and no leading `./`. Areas can be added
+     > later when tasks start clustering.
 
      Then: **brownfield** — scan the top-level structure and propose areas
      with that parallelization heuristic and path-preferring names (no hard

@@ -19,9 +19,10 @@ single id. `/dev auto` stays one task per cycle.
      run the full `/dev add` path on that text (SKILL.md *Adding work*), and
      mention once that implement filed new work. Direct add → continue
      resolve/preflight on the new id, with no second confirmation to start
-     building (the user already asked to implement). Plan flow → after the
-     user approves and tasks are filed, continue implement on them (several →
-     `flows/implement-batch.md`); if plan stops without filing, stop.
+     building (the user already asked to implement). Plan or shape flow →
+     after the user approves and tasks are filed, continue implement on them
+     (several → `flows/implement-batch.md`); if that path stops without
+     filing, stop.
 
    Read the resolved task's body and any `Decision:` lines. Then **preflight**
    its current state:
@@ -38,6 +39,8 @@ single id. `/dev auto` stays one task per cycle.
    - `done` → say so and stop.
    - `not-planned` → show the recorded reason and stop; proceed only if the
      user revives it (`--status backlog`).
+   - `later` → parked for a future iteration; stop. Proceed only if the user
+     revives it (`--status backlog` or `/dev pick <id>`).
 
    If the task now looks pointless (already solved, superseded, false
    premise), say so before writing code — the user chooses whether to drop
@@ -138,16 +141,19 @@ single id. `/dev auto` stays one task per cycle.
      (`--append`, or title/desc if needed) and continue.
    - **Re-triage (drastic only):** clearly multi-PR, a second independent
      goal, or a new product area folded into this task. Pause implement; hand
-     the *expanded* ask through `/dev add` triage (sibling tasks vs plan
-     flow). Keep or narrow the current task to its original unit — do not
+     the *expanded* ask through `/dev add` triage (sibling tasks vs plan or
+     shape). Keep or narrow the current task to its original unit — do not
      absorb the expansion. After triage, offer to resume implement on the
      current task (user decides). When unsure whether the expansion is
      drastic, prefer in-place.
 
-5. **Self-review**: re-read the full diff (`git diff <integration>...HEAD`)
-   with fresh eyes: crash risks, unintended file touches, scope creep,
-   leftover debug code, convention drift. Fix what you find. If a deeper
-   review tool exists in this environment, use it.
+5. **Self-review**: `TASKS diff <id>` — it resolves the task worktree
+   (session cwd stays on the hub) and prints location plus the review
+   diff. Never ambient `git diff` / `git status`; an empty hub tree is
+   not a clean self-review. Re-read that output with fresh eyes: crash
+   risks, unintended file touches, scope creep, leftover debug code,
+   convention drift. Fix what you find. If a deeper review tool exists
+   in this environment, use it.
 
 6. **Ship**: `TASKS ship <id> --shipped "<what actually shipped>"` from the
    printed `product` dir (optional `--message`, `--title`, `--body`,
@@ -172,6 +178,8 @@ single id. `/dev auto` stays one task per cycle.
    step the product uses (agent decides), or `major` (breaking — interactive
    asks the user first; auto flags `needs: decision` instead of shipping).
    The actual bump happens at merge into integration (flows/review.md).
+   A Dev-batch or stack: one bump sized for the whole set after the last
+   member lands (flows/review-batch.md), not one bump per PR.
 
 7. Report: what changed, anything risky, the PR link. **If `whoami` is the
    board `integrator`**, end with one line: open a **new session** for
@@ -179,8 +187,9 @@ single id. `/dev auto` stays one task per cycle.
    pollutes judgment). Hint only; never force a session boundary or
    auto-start review. Non-integrator implementers: normal handoff is enough.
 
-**Resuming after changes were requested** on the PR: same flow from step 4 on
-the existing branch; fix on the branch, `TASKS ship <id> --shipped "<what
+**Resuming after changes were requested** on the PR: `TASKS diff <id>` first
+(re-orients to the worktree), then the same flow from step 4 on the
+existing branch; fix on the branch, `TASKS ship <id> --shipped "<what
 changed since the last ship>"`, then note on the PR what changed
 (`gh pr comment`). The re-ship record covers the fixes, not the whole task
 again — the earlier records stay.

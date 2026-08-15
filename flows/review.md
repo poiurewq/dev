@@ -56,19 +56,23 @@ re-run with the full required set. Exit 0 → continue below.
      decision. If the PR author is **not** the current user, also
      `gh pr review --approve` (optional audit trail); if the author **is**
      the current user, **skip** it — GitHub rejects self-approves. Then run
-     `TASKS land <id>`, which owns rebase, merge, cleanup and the move to
-     `done`; never hand-roll any of it. Land does **not** auto-approve, and
-     refuses if the PR base is not the board integration branch. Run it from
-     the primary clone or product dir — not from inside the task worktree it
+     `TASKS land <id>`, which owns destack of immediate stacked children
+     onto integration (before the parent is rewritten), restack of
+     deeper descendants onto those rewritten parents, rebase, merge,
+     cleanup and the move to `done`; never hand-roll any of it. Land does **not** auto-approve, and refuses if
+     the PR base is not the board integration branch. Run it from the
+     primary clone or product dir — not from inside the task worktree it
      will remove. Idempotent if the PR is already merged; `TASKS cleanup
      <id>` alone clears leftover local state, deleting the task branch only
      when the PR is verified MERGED and never touching a dirty worktree. If
-     land prints a **Version intent** other than `none`, apply that bump on
-     the integration branch after merge per the product's versioning docs
-     (not on the task branch). **Always surface the script's full output**:
-     on non-zero exit or any early abort (`error: …`), show the message and
-     stop — do not retry with hand-rolled git/gh, and do not claim the task
-     landed.
+     land prints a **Version intent** other than `none`, apply one bump
+     on the integration branch when this set is done (a single PR is a
+     set of one) per the product's versioning docs (not on the task
+     branch). A Dev-batch or stack: sized for the whole set
+     (flows/review-batch.md).
+     **Always surface the script's full output**: on non-zero exit or any
+     early abort (`error: …`), show the message and stop — do not retry
+     with hand-rolled git/gh, and do not claim the task landed.
    - **Request changes**: concise and actionable; the task stays in `review`.
      If the PR author is **not** the current user:
      `gh pr review --request-changes --body <agreed comments>`. If the author
@@ -92,8 +96,9 @@ re-run with the full required set. Exit 0 → continue below.
 
 1. Walk the user through them (batch by goal): for each, one plain sentence
    of purpose, then keep / modify / drop.
-2. Keep → `TASKS update <id> --status backlog` (plus any edits). If the
-   proposal decomposes a parent task, wire membership on that parent:
+2. Keep → `TASKS update <id> --status backlog` (plus any edits). Intended
+   but not this iteration → `--status later`. If the proposal decomposes a
+   parent task, wire membership on that parent:
    `TASKS update <parent> --kind umbrella --deps <accepted-ids>` (merge with
    any existing deps) and note the decomposition in its body (`--append`).
 3. Drop → offer both: `TASKS update <id> --status not-planned --reason

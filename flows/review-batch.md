@@ -22,8 +22,8 @@ batch.
 
 1. **Review all first** — no mid-batch land. Keep the stack/batch alive.
 2. **Land only after every member is approved** — then land in stack/topo
-   order via `TASKS land` only, restacking onto updated integration between
-   lands as needed.
+   order via `TASKS land` only. Land destacks children first (parent tip
+   still stable), then merges and deletes the parent branch.
 
 When a Dev-batch (or stack component) applies, this **supersedes** the
 single-review "land one then next" multi-PR path in `flows/review.md`. That
@@ -77,14 +77,13 @@ Topo-sort; lower id breaks ties. Cycle → stop and report. Same order as
 
 For each id in order:
 
-1. Ensure the PR base is the board integration branch. If still stacked on a
-   sibling branch, restack onto integration first: `TASKS restack --ids <id>`
-   (parent outside the set → rebase onto integration and **auto-retarget** PR
-   base; `--onto <integration>` is equivalent). After earlier lands,
-   integration already contains their squash merges.
-2. `TASKS land <id>` only — never hand-roll merge. Surface full output; on
-   `error:` stop the land wave (the rest stay in `review`).
-3. Version intent handling per single-task review (product docs).
+1. `TASKS land <id>` only — never hand-roll merge. Land destacks
+   children first (retarget + `--onto`, peel one layer; does not flatten
+   the stack), then merges. Surface full output; on `error:` stop the
+   land wave (the rest stay in `review`).
+2. Version intent: after the **last** member of the set lands, apply **one**
+   bump sized for the whole set (greatest of the stated intents). Do not
+   bump per PR. If the wave stops early, wait — do not bump twice later.
 
 ### 3. Report
 
