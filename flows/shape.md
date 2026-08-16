@@ -1,7 +1,7 @@
 # Shape flow — cut many threads onto the board
 
-Entry: **only** when `/dev add` triage picks the shape path (SKILL.md
-**Adding work**). Many threads must be cut *together* before tasks are
+Entry: **only** when `/dev add` triage picks the shape path (`flows/add.md`).
+Many threads must be cut *together* before tasks are
 knowable — a new product, a first iteration, or a large new subsystem.
 Not a new verb. Do not load this file from plan.
 

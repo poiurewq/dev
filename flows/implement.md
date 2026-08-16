@@ -16,7 +16,7 @@ single id. `/dev auto` stays one task per cycle.
      freeform goal to add.
    - **Goal**: `TASKS list`, match on title/body; confirm if not obvious.
      Clear match → that task. Ambiguous → ask. **No match** → **file first**:
-     run the full `/dev add` path on that text (SKILL.md *Adding work*), and
+     run the full `/dev add` path on that text (`flows/add.md`), and
      mention once that implement filed new work. Direct add → continue
      resolve/preflight on the new id, with no second confirmation to start
      building (the user already asked to implement). Plan or shape flow →
@@ -46,21 +46,24 @@ single id. `/dev auto` stays one task per cycle.
    premise), say so before writing code — the user chooses whether to drop
    it.
 
-   Then four pre-claim checks, **always**:
+   Then three pre-claim checks, **always**:
    - **Area sanity**: does the recorded area still fit what this task will
      actually touch? (The codebase may have shifted since declaration.) If
      not, surface it; on the user's approval, `TASKS update <id> --area
      "<better>"` before proceeding.
-   - **Area collision**: `TASKS list --status doing`, applying the collision
-     rule from SKILL.md *Area stewardship*. Warn the user on any overlap with
-     another contributor's task — proceed or wait is their call. An `all`
-     task additionally requires an otherwise-quiet board **and** the user's
-     explicit confirmation that other contributors are paused; the board
-     can't see teammates' terminals, so the user vouches.
-   - **Same-area review**: `TASKS list --status review`, same rule. Surface
-     overlapping tasks with their `pr` links and suggest reviewing/landing
-     them first — proceed or switch to `/dev review` is the user's call.
-     Board fields only; do not enumerate GitHub PRs outside the board.
+   - **Area collision**: `TASKS collisions <id>` (SKILL.md *Area
+     stewardship*). Exit 2 → print the output and **stop** — do not claim.
+     Any assignee's `doing` or `review` in an overlapping area counts,
+     including this user's other work. Resume of the same id is clear
+     (self is excluded). Resume of a `Dev-batch:` member must pass the
+     whole set (resume path below) — a single id false-aborts on
+     same-area siblings still in review. An `all` task additionally
+     requires an otherwise-quiet board **and** the user's explicit
+     confirmation that other contributors are paused; the board can't
+     see teammates' terminals, so the user vouches. Multi-id / batch:
+     use `TASKS collisions <id,id,…>` for the whole set (see
+     `flows/implement-batch.md`) — never the single id, or in-set
+     review after an earlier ship would false-abort.
    - **Local integration ahead**: `TASKS preflight` (fetches and reports).
      Exit 0 = clear, or ahead only on out-of-scope paths (soft note already
      printed). Exit 2 = in-scope ahead: stop. The working tree on integration
@@ -121,9 +124,12 @@ single id. `/dev auto` stays one task per cycle.
    throw-away leftover delete above (`gh pr close`, `git worktree
    remove`, local branch delete, `git push origin --delete <name>`).
 
-3. **Branch**: already done by `claim`. Confirm you are in the printed
-   `product` dir on the task branch, and that the printed `base:` is the
+3. **Branch**: already done by `claim`. Confirm the printed `base:` is the
    origin/integration ref you expect (claim verifies it; do not assume).
+   Session cwd stays on the hub. Edit, compile, test, and run product
+   files from the printed `product` dir (`cd` or the command's
+   working-directory flag) — a green result on the hub is integration,
+   not the branch. Do not wrap those commands in TASKS.
 
 4. **Implement.** Match existing conventions. **Design forks — surface,
    don't decide**: where the task is silent on a choice that repo conventions
@@ -131,8 +137,9 @@ single id. `/dev auto` stays one task per cycle.
    sync/async), name the fork, the options, and the tradeoff you'd weigh, and
    ask the user before writing code down that path. Record the answer with
    `TASKS update <id> --append "Decision: <choice + one-line why>"`. If you
-   hit a non-obvious pitfall, add a one-line gotcha to the nearest
-   `AGENTS.md`.
+   hit a non-obvious pitfall, or discover a convention or decided rule
+   that isn't obvious from the code, add a one-line invariant to the
+   nearest `AGENTS.md` (SKILL.md *Vendor-neutral*).
 
    **Mid-flight scope changes** (high bar for re-triage). If the user expands
    the ask while you are implementing:
@@ -188,8 +195,10 @@ single id. `/dev auto` stays one task per cycle.
    auto-start review. Non-integrator implementers: normal handoff is enough.
 
 **Resuming after changes were requested** on the PR: `TASKS diff <id>` first
-(re-orients to the worktree), then the same flow from step 4 on the
-existing branch; fix on the branch, `TASKS ship <id> --shipped "<what
-changed since the last ship>"`, then note on the PR what changed
-(`gh pr comment`). The re-ship record covers the fixes, not the whole task
-again — the earlier records stay.
+(re-orients to the worktree). Then `TASKS collisions` with the task's
+`Dev-batch:` ids (the single id if none) — exit 2 is outside occupancy,
+stop; batch peers in review must not false-abort. Then the same flow
+from step 4 on the existing branch; fix on the branch, `TASKS ship <id>
+--shipped "<what changed since the last ship>"`, then note on the PR
+what changed (`gh pr comment`). The re-ship record covers the fixes,
+not the whole task again — the earlier records stay.

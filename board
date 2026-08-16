@@ -1,0 +1,8 @@
+#!/usr/bin/env python3
+"""Local board viewer (r/a/q; type id↵). Written by dev init; left alone if you edit it."""
+import os, sys
+TASKS = '/Users/qzhang/.grok/skills/dev/scripts/tasks.py'
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
+if not os.path.isfile(TASKS):
+    sys.exit("error: dev skill not found at %s — delete ./board and re-run init" % TASKS)
+os.execv(sys.executable, [sys.executable, TASKS, "board", "--watch"])

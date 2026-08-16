@@ -49,11 +49,22 @@ TASKS update <id> [--title "<t>"] [--area <m>] [--status <s>]
           [--status not-planned --reason "<why>"]   # reason is required
 TASKS delete <id>
 TASKS show <id>
+TASKS collisions <id[,id…]>             # area occupancy vs doing/review;
+                                        # multi-id also prints in-set overlap;
+                                        # exit 2 if any id is in-flight-blocked
+                                        # (batch peers excluded from that check)
 TASKS related "<text>"                  # existing tasks similar to <text>;
                                         # run before every add
 TASKS list [--assignee <who>] [--status <s>] [--needs decision] [--json]
-TASKS board [--expand] [--by-area]      # collapses umbrella children;
-                                        # --by-area groups by area not status
+TASKS board [--expand] [--by-area] [--watch]
+                                        # index: one line per status (or
+                                        # area) of task ids; then in-play
+                                        # tasks one per line. collapses
+                                        # umbrella children; done/later/
+                                        # not-planned fold to a count;
+                                        # --expand lists children and those
+                                        # three; --watch: r/a/q, type id↵
+                                        # for area collisions (./board)
 TASKS iteration
 TASKS iteration-close [--force]
 TASKS iteration-new <branch> [--parent <branch>] [--name <name>]
@@ -67,7 +78,7 @@ TASKS claim <id> [--assignee <who>] [--branch <b>]
                                         # worktree under .dev/worktrees
                                         # (primary stays hub), status=doing;
                                         # prints workdir + product + verified
-                                        # base (edit in product)
+                                        # base (edit + compile/test/run in product)
 TASKS diff <id>                         # location + review diff from the
                                         # task worktree (not session cwd);
                                         # implement self-review / resume
@@ -145,15 +156,27 @@ away, or paper over it with manual git/gh.
   implementation and may not be the best. When any part doesn't make sense or
   could be clearly improved, say so; when something is unclear, ask. The
   commitment is to a good product, not to the user's words.
-- **Vendor-neutral**: repo docs live in `AGENTS.md` (per directory as
-  needed); if a repo only has `CLAUDE.md`, make `AGENTS.md` the real file and
-  `CLAUDE.md` a symlink to it — not the reverse.
+- **Vendor-neutral**: product docs live in `AGENTS.md` at the directory
+  that owns the code (create or update the nearest one that covers what
+  you touched — a nested package's rule does not go in the repo root).
+  Record non-obvious invariants there: conventions and decided
+  architectural, procedural, or domain rules, not only implementer
+  gotchas. Keep it lean; skip anything obvious from the code. If
+  `CLAUDE.md` is present, it is a symlink to that `AGENTS.md` — not
+  the reverse (promote a lone `CLAUDE.md`; if both are regular files,
+  fold unique content into `AGENTS.md`, then replace `CLAUDE.md` with
+  a symlink).
 - **Under-specify tasks, and write short.** A task description is a few
-  sentences: goal + non-goals if any; details get resolved at implementation
-  time. The same brevity applies to everything else you write — appended
-  decisions, PR bodies, reports to the user. Review bandwidth is the
-  scarcest resource on the board, and verbose text spends it. Never produce
-  long specs, plans, or status reports the user didn't ask for.
+  sentences: the goal. Details get resolved at implementation time. The
+  same brevity applies to everything else you write — appended decisions,
+  PR bodies, reports to the user. Review bandwidth is the scarcest
+  resource on the board, and verbose text spends it. Never produce long
+  specs, plans, or status reports the user didn't ask for.
+- **Do not manufacture specifications.** When adding or modifying a task,
+  never write constraints, non-goals, interfaces, or other requirements
+  the user did not explicitly state or approve. Future agents treat the
+  task file as human-approved. Non-goals belong on the task only when the
+  user said them.
 - Natural-language intents map onto subcommands; fulfill them and mention the
   keyword once ("done — btw, `/dev pick 12` does this directly"). Always show
   a suggested command's argument shape — `/dev add <task-or-goal>`,
@@ -183,14 +206,21 @@ away, or paper over it with manual git/gh.
   = normal). An umbrella's `deps` are its **direct children** (leaves or
   nested umbrellas) — hierarchy is the dep graph among `kind: umbrella`
   nodes, with no separate parent field.
-  `TASKS board` collapses those children under the umbrella with a
-  leaf status rollup; `--expand` lists every task flat; `--by-area` groups by
-  area instead of status (same collapse).
+  `TASKS board` is an index (one line per status of task ids) then
+  in-play tasks one per line. It collapses umbrella children under the
+  parent with a leaf status rollup; done, later, and not-planned fold
+  to a count. `--expand` lists children and those three in the index
+  and the list; `--by-area` indexes by area instead of status (same
+  collapse; folded statuses stay counts on last index lines unless
+  `--expand`).
 - `<scope>/.dev/` — product-local, gitignored, per-checkout (root board →
   `.dev/` at the git toplevel): `identity`, `boards.json` (scope→branch
   cache), `board/` (hidden worktree on a private branch `_dev-board` or
   `_dev-board-<scope>`), `worktrees/` (task worktrees).
 - `<scope>/TASKS.md` — derived kanban view, gitignored, regenerated by `board`.
+- `<scope>/board` — local live viewer (`r` refresh, `a` toggle by-area, `q` quit, type a task id + Enter for area collisions), gitignored,
+  written by `init` if missing and refreshed by `init` / `board` while still
+  a stock wrapper. Not `.dev/board` (that is the board worktree).
 
 Statuses: `proposed` (auto-filed, awaiting human approval) → `backlog` →
 `planned` → `doing` → `review` → `done`. Off to the side: `later` — intended,
@@ -206,7 +236,7 @@ awaiting a human call, detailed in the task body.
 | `/dev` (bare) | First contact, below. |
 | `/dev help` | Full options table (below). No board/identity → same setup path as bare. |
 | `/dev init` | Read `flows/init.md` (identity, board creation/adoption, gh setup, areas). |
-| `/dev add <task-or-goal>` | **Adding work**, below — triage, then direct add, plan, or shape. |
+| `/dev add <task-or-goal>` | Read `flows/add.md` (triage, then direct add, plan, or shape). |
 | `/dev plan <goal>` | Alias of `/dev add` (same triage). |
 | Freeform new work | Same as `/dev add`. |
 | `/dev implement <id[, id…]|goal>` | Read `flows/implement.md` (multi → also `flows/implement-batch.md`; claim, forks, PR). |
@@ -214,8 +244,8 @@ awaiting a human call, detailed in the task body.
 | `/dev auto` | Read `flows/auto.md` (autonomous implement cycle). |
 | `/dev absorb <source>` | Read `flows/absorb.md` (import an external task list). |
 | `/dev iteration ...` | Read `flows/iteration.md` (show / close / new). |
-| `/dev board` / `kanban` | `TASKS board` (status columns); `TASKS board --by-area` for the area cut; then PR state refresh (below). |
-| `/dev meta [id-or-area]` | Read `flows/meta.md` (pressure the board; optional focus). Freeform "does this board still make sense?" too. |
+| `/dev board` / `kanban` | `TASKS board` (status index + in-play list); `TASKS board --by-area` for the area cut; then PR state refresh (below). |
+| `/dev meta [id-or-area]` | Read `flows/meta.md` (pressure the board; optional focus). `/dev meta area` (or `areas`) is reserved: area-validity pass only. Freeform "does this board still make sense?" too. |
 | `/dev status` | Your plate — see "Status" below. |
 | `/dev pick <id-or-desc>` | `TASKS update <id> --status planned --assignee <me>`; if already assigned to someone else, confirm the takeover with the user first. |
 | `/dev change <id> <what>` / `modify` | Map onto `TASKS update <id> --...`; show the result. |
@@ -235,7 +265,7 @@ the filesystem for it yourself. Identity is **product-local**
 `--scope`; a bare monorepo root with no board there errors. If `whoami`
 errors, run the init flow. Given a description instead of an id, run
 `TASKS list`, match, confirm if not obvious. **`/dev implement` only:** if
-nothing matches, run the `/dev add` path first (Adding work below), then
+nothing matches, run the `/dev add` path first (`flows/add.md`), then
 continue implement on the new task(s) — details in `flows/implement.md`.
 Other id-or-desc commands (`pick`, `show`, …) still require a match.
 
@@ -329,46 +359,10 @@ Emit it whole — don't reorder, trim to "what's relevant", or annotate.
 | **See** | `/dev board` — the whole board (status) · `/dev board --by-area` — cut by area · `/dev status` — your plate · `/dev show <id>` — one task |
 | **Add work** | `/dev add <task-or-goal>` — file a task, or work a goal or pile of threads onto the board · `/dev absorb <file>` — import an existing list |
 | **Do work** | `/dev pick <id>` — claim it · `/dev implement <id[, id…]|goal>` — build it (or a batch) and open PR(s); unknown goal is filed via add triage first · `/dev auto` — hand one to an agent |
-| **Decide** | `/dev review` — PRs, design questions, and proposals waiting on you · `/dev meta` — pressure the board (assumptions, areas, later) |
+| **Decide** | `/dev review` — PRs, design questions, and proposals waiting on you · `/dev meta` — pressure the board · `/dev meta area` — area-validity only |
 | **Adjust** | `/dev change <id> <what>` · `/dev delete <id>` · `/dev area` · `/dev config` |
 | **Iterate** | `/dev iteration` — show, close, or start the next one |
 | **Skill** | `/dev skill` — version and update state · `/dev skill update` — pull latest dev skill · `/dev skill update auto on/off` — opt-in auto-apply · `/dev skill feedback <text>` — file a bug or idea about the skill as an issue on its public repo |
-
-## Adding work (`/dev add`)
-
-Covers `/dev add <task-or-goal>`, freeform new work, and the `/dev plan`
-alias. One entry point; the agent triages.
-
-### Triage (always first)
-
-Do not ask the user which path. Decide:
-
-| Path | When |
-|---|---|
-| **Direct add** | One right-sized unit (≈ one focused PR): clear outcome, few design forks, or a single "consider X" item. Continue with **Direct add** below. |
-| **Plan flow** | Several deliverables already visible, real ordering across pieces, or an iteration-level / multi-PR goal. Read `flows/plan.md`. |
-| **Shape** | Many threads must be cut *together* before tasks are knowable — new product, first iteration, or a large new subsystem. Read `flows/shape.md`. |
-
-**Grey area → prefer direct add** (under-specify). Implement still decomposes
-oversized tasks; plan is for breakdown the user needs *now*, not every
-large-sounding phrase. Shape is rarer than plan: only when the cut itself
-is not yet knowable. After triage, do the work and mention the path once
-("filed as one task" / "breaking into tasks" / "shaping this onto the board").
-
-### Direct add
-
-1. Draft title, area (`TASKS area list`; reuse before inventing — greenfield
-   rule: no areas until ~3 tasks cluster), and a 1–3 sentence description.
-2. **Check the board first**: `TASKS related "<title + description>"`.
-   - Substantially the same task exists → say so and propose amending it
-     (`TASKS update <id> ...`) instead of adding a duplicate. The user
-     decides; add anyway if they want them separate.
-   - Otherwise judge the neighbours it lists for **dependencies in both
-     directions** — must something else land first (`--deps`), or does an
-     existing task now depend on this one (update *its* deps)? Propose the
-     links; don't invent ordering that isn't real.
-3. `TASKS add --title "..." [--area m] [--deps 1,2] [--desc "..."]`, then
-   show the task as recorded (the script prints it).
 
 ## Not planned (inline)
 
@@ -402,14 +396,20 @@ disjoint areas can't conflict, so dev steers concurrent work apart. A task's
 on one **segment-prefix-overlaps** any name on the other: split on `/`;
 `flows` overlaps `flows/implement` and `flows/other`; `flows/implement` does
 not overlap `flows/review`; `flow` does not overlap `flows` (string prefix
-is the trap). On collision with in-flight (`doing`) work **or** `review`
-tasks, interactive flows warn the user (their call —
-proceed, wait, or review/land first) and auto agents skip. The reserved area
+is the trap). The script owns this check (`areas_overlap` /
+`in_flight_area_collisions` in tasks.py); `TASKS collisions <id[,id…]>`
+and watch-mode type-id query it. On collision with in-flight (`doing`)
+work **or** `review` tasks — any assignee, including the current user —
+implement **aborts** (print the collisions output and stop; do not claim).
+Auto skips. A multi-id call excludes the other ids in the set from that
+fail check (batch members are sequential) and prints `set:` overlap
+lines as information only. Resume of one batch member uses that same
+set (`flows/implement.md`), not the single id. The reserved area
 **`all`** marks a task that may touch everything (wide refactors, some
 umbrellas): it collides with every task, so it runs only on an otherwise-
-quiet board (nothing in `doing`) with the user's explicit confirmation that
-other contributors are paused; auto never picks it, and it's never listed in
-areas.md.
+quiet board (nothing in `doing` or `review`) with the user's explicit
+confirmation that other contributors are paused; auto never picks it, and
+it's never listed in areas.md.
 
 A name with `/` is a path: parents are implied by segments, with no parent
 field. A parent is a subtree-wide lock (`flows` = any/all `flows/*`) and is
@@ -437,12 +437,13 @@ work still uses a short slash-free phrase (spaces fine). Form: no trailing
 
 `/dev area` with no args → `area list` only. Validity (stale names,
 path-renames, parent-used-as-residual, leftover extensions) lives under
-`/dev meta` (flows/meta.md). `area list` open counts and `area rm`
+`/dev meta area` (flows/meta.md). `area list` open counts and `area rm`
 (without `--force`) match **exact names only** — a parent is not
 responsible for its children's tasks; later still occupies; not-planned
-does not. `TASKS board --by-area` reads the board along the area axis:
-multi-area tasks appear under each listed area, umbrellas collapse as on
-the status board.
+does not. `TASKS board --by-area` indexes along the area axis: multi-area
+tasks appear on each listed area's id line, umbrellas collapse as on
+the status board, and done/later/not-planned fold to counts on last
+index lines.
 
 ## Status (`/dev status`)
 

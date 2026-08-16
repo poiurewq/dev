@@ -65,6 +65,10 @@ user add one before going further.
      already uses iteration branches, ask which. Pass `--integration` (and
      `--parent`, `--iteration` when applicable).
    - Run `TASKS init --name <handle> [--scope s] [--integration b] [--parent p]`.
+     Init writes a gitignored `./board` viewer at the product root
+     (`r` refresh, `a` toggle by-area, `q` quit) if missing, and refreshes
+     it when it is still a stock wrapper. `TASKS board` does the same. A
+     user-edited `./board` is left alone.
    - *Areas*: first give the user this primer (verbatim or near):
 
      > Areas are coarse labels for regions of the codebase. Every task
@@ -111,4 +115,4 @@ user add one before going further.
    still goes only through `TASKS`, never hand-edited.
 
 7. Report what was set up: scope, integration branch, integrator, areas, gh
-   status.
+   status, and the `./board` viewer (`r` refresh, `a` toggle by-area, `q` quit).

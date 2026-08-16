@@ -68,7 +68,10 @@ re-run with the full required set. Exit 0 → continue below.
      land prints a **Version intent** other than `none`, apply one bump
      on the integration branch when this set is done (a single PR is a
      set of one) per the product's versioning docs (not on the task
-     branch). A Dev-batch or stack: sized for the whole set
+     branch). Session cwd is already the product on the hub — land
+     prints `product: <abs>`; apply those docs there with
+     product-relative paths (do not prefix the board scope). A
+     Dev-batch or stack: sized for the whole set
      (flows/review-batch.md).
      **Always surface the script's full output**: on non-zero exit or any
      early abort (`error: …`), show the message and stop — do not retry

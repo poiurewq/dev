@@ -1,7 +1,7 @@
 # Plan flow — break a goal into board tasks
 
-Entry: **only** when `/dev add` triage picks the plan path (SKILL.md
-**Adding work**); `/dev plan <goal>` is a legacy alias using the same triage.
+Entry: **only** when `/dev add` triage picks the plan path (`flows/add.md`);
+`/dev plan <goal>` is a legacy alias using the same triage.
 The user states a higher-level goal; you tease out just enough shape to break
 it into board tasks. Lighter than a spec workflow: a handful of questions,
 not a cross-examination, and no standing spec document — the umbrella task's
@@ -16,7 +16,9 @@ body carries the goal.
    fork-surfacing catches the rest.
 
 2. **Draft the breakdown**: a handful of tasks with few-sentence descriptions
-   and deps where ordering is real. Right-sized (≈ one focused PR) when the
+   from what the user said (do not manufacture non-goals or constraints —
+   SKILL.md *Do not manufacture specifications*) and deps where ordering is
+   real. Right-sized (≈ one focused PR) when the
    goal permits; for very large goals, a few **mid-sized** tasks are fine —
    each gets decomposed in its own future sitting rather than fleshing out
    fifty leaves now. Plus one **umbrella task** — titled after the user's

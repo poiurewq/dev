@@ -41,9 +41,11 @@ Run the steps below **before claiming anything**, then run
    report it. State the order once ("implementing as 13 → 15 → 14") and
    proceed.
 5. **Shared preflight once:** `gh auth`, then `TASKS preflight` (check only)
-   from implement.md step 0. For the union of areas across the set: **area
-   collision** (`doing`) and **same-area review** as in step 0. Warn; on user
-   go-ahead, continue.
+   from implement.md step 0. Then `TASKS collisions <id,id,…>` with the
+   **whole set** (not one id). Exit 2 → refuse the batch and print the
+   output (outside `doing`/`review` occupancy). `set:` overlap lines mean
+   members share an area — informational; implement sequentially. If any
+   member is `all`, also require the quiet-board vouch from implement.md.
 6. **Implement sequentially** in that order, running implement.md steps 0–7
    per id (lightweight re-check of state, claim, branch, implement, ship).
    Reuse the shared ahead check if the tree is still clean.
@@ -59,9 +61,11 @@ Run the steps below **before claiming anything**, then run
      earlier members of this batch (typically now `review` after their ship),
      proceed. Still stop if an unfinished dep is outside the set (shouldn't
      happen after step 3 unless the board moved).
-   - **Same-area review** for a later member: ignore other tasks that are
-     already members of this batch (their PRs are expected); still warn on
-     outside same-area `review` work.
+   - **Area collision** for a later member: re-check with
+     `TASKS collisions <id,id,…>` for the **whole set**, not the single
+     id — in-set `review` after an earlier ship is expected. Exit 2
+     (outside occupancy) → stop; leave already-shipped members in
+     `review` and report the rest.
    - If a later member becomes unstartable mid-batch (board moved), stop;
      leave already-shipped members in `review` and report the rest.
 7. **Out of scope for this path:** parallel worktrees or parallel agents for

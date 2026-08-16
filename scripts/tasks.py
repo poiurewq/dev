@@ -41,6 +41,9 @@ TERMINAL = ("done", "later", "not-planned")
 OUT_OF_PLAY = ("later", "not-planned")
 STATUS_LABEL = {"not-planned": "Not planned", "later": "Later"}
 TASKS_DIR = ".tasks"
+# Local live viewer dropped by init at <product>/board. Not .dev/board —
+# that path is the hidden board worktree.
+VIEWER_NAME = "board"
 # On-disk board schema. Bump when board.yml / task frontmatter / .tasks layout
 # changes in a way future scripts must detect. Missing schema_version on disk
 # means 0 (pre-stamp boards). Never downgrade a higher version on write.
@@ -151,6 +154,106 @@ def product_root(root, scope):
     if scope in (".", ""):
         return root
     return os.path.join(root, scope)
+
+
+def viewer_path(root, scope):
+    """Local live-viewer script: <product>/board."""
+    return os.path.join(product_root(root, scope), VIEWER_NAME)
+
+
+def viewer_ignore_line(scope):
+    """Gitignore line for the viewer. Anchored so a project `board/` is safe."""
+    rel = VIEWER_NAME if scope in (".", "") else os.path.join(scope, VIEWER_NAME)
+    return "/" + rel.replace(os.sep, "/")
+
+
+def append_ignore_line(path, line):
+    """Append `line` to a gitignore-style file if missing. True if wrote."""
+    existing = open(path).read() if os.path.exists(path) else ""
+    if line in existing.splitlines():
+        return False
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "a") as f:
+        if existing and not existing.endswith("\n"):
+            f.write("\n")
+        f.write(line + "\n")
+    return True
+
+
+# Thin wrapper init writes. __TASKS_PY__ is replaced with repr(path).
+BOARD_VIEWER_SCRIPT = '''\
+#!/usr/bin/env python3
+"""Local board viewer (r/a/q; type id↵). Written by dev init; left alone if you edit it."""
+import os, sys
+TASKS = __TASKS_PY__
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
+if not os.path.isfile(TASKS):
+    sys.exit("error: dev skill not found at %s — delete ./board and re-run init" % TASKS)
+os.execv(sys.executable, [sys.executable, TASKS, "board", "--watch"])
+'''
+
+# Code lines a generated ./board may contain (any template generation).
+# Opening docstring and blanks are ignored; anything else is a user edit.
+_STOCK_VIEWER_LINE = re.compile(
+    r"^(?:"
+    r"#!/usr/bin/env python3"
+    r"|import os, sys"
+    r"|TASKS = (?:'[^']*'|\"[^\"]*\")"
+    r"|os\.chdir\(os\.path\.dirname\(os\.path\.abspath\(__file__\)\)\)"
+    r"|if not os\.path\.isfile\(TASKS\):"
+    r"|    sys\.exit\(.+\)"
+    r"|os\.execv\(sys\.executable, \[sys\.executable, TASKS, \"board\", \"--watch\"\]\)"
+    r")$"
+)
+
+
+def viewer_script():
+    """Current ./board contents for this install."""
+    return BOARD_VIEWER_SCRIPT.replace(
+        "__TASKS_PY__", repr(os.path.abspath(__file__)))
+
+
+def viewer_is_stock(text):
+    """True if text is still an init-generated thin wrapper.
+
+    Docstring and TASKS path may drift; extra statements or a different
+    command mean the user edited it.
+    """
+    text = text.replace("\r\n", "\n")
+    text = re.sub(
+        r"(?s)\A(#!.*\n)?(?:\n)*(\"\"\"[\s\S]*?\"\"\"|'''[\s\S]*?''')[ \t]*\n",
+        r"\1",
+        text,
+        count=1,
+    )
+    lines = [ln.rstrip() for ln in text.splitlines() if ln.strip()]
+    if not any('TASKS, "board", "--watch"' in ln for ln in lines):
+        return False
+    return all(_STOCK_VIEWER_LINE.match(ln) for ln in lines)
+
+
+def ensure_board_viewer(root, scope):
+    """Write <product>/board if missing or still a stock wrapper.
+
+    Returns (path, wrote). Leaves a user-edited file and a directory alone.
+    """
+    dest = viewer_path(root, scope)
+    if os.path.isdir(dest):
+        return dest, False
+    content = viewer_script()
+    if os.path.isfile(dest):
+        try:
+            existing = open(dest, encoding="utf-8").read()
+        except (OSError, UnicodeDecodeError):
+            return dest, False
+        if existing == content or not viewer_is_stock(existing):
+            return dest, False
+    with open(dest, "w", encoding="utf-8") as f:
+        f.write(content)
+    os.chmod(dest, 0o755)
+    return dest, True
 
 
 def board_branch_name(scope):
@@ -643,6 +746,107 @@ def split_areas(s):
 def occupies_area(t):
     # later still occupies (intended work); not-planned is historical only.
     return t["status"] not in ("done", "not-planned")
+
+
+# doing + review: the in-flight set implement aborts on / auto skips.
+IN_FLIGHT = ("doing", "review")
+
+
+def areas_overlap(a, b):
+    """Segment-prefix overlap (SKILL Area stewardship).
+
+    Split on `/`. `flows` overlaps `flows/implement`; `flows/implement` does
+    not overlap `flows/review`. String prefix is the trap (`flow` vs `flows`).
+    Reserved `all` overlaps every name.
+    """
+    if a == "all" or b == "all":
+        return True
+    sa = [p for p in a.split("/") if p]
+    sb = [p for p in b.split("/") if p]
+    n = min(len(sa), len(sb))
+    return bool(n) and sa[:n] == sb[:n]
+
+
+def task_areas_overlap(a_areas, b_areas):
+    """True if any area on one overlaps any on the other.
+
+    Reserved `all` on either side overlaps every task, including untagged.
+    """
+    if "all" in a_areas or "all" in b_areas:
+        return True
+    return any(areas_overlap(x, y) for x in a_areas for y in b_areas)
+
+
+def in_flight_area_collisions(task, tasks, exclude_ids=None):
+    """doing/review tasks whose areas overlap `task`, excluding itself.
+
+    ``exclude_ids`` drops extra ids from the scan (batch peers — they are
+    sequential, not outside occupancy).
+    """
+    skip = {task["id"]}
+    if exclude_ids:
+        skip.update(exclude_ids)
+    mine = split_areas(task.get("area", ""))
+    hits = []
+    for other in tasks:
+        if other["id"] in skip:
+            continue
+        if other.get("status") not in IN_FLIGHT:
+            continue
+        if task_areas_overlap(mine, split_areas(other.get("area", ""))):
+            hits.append(other)
+    return hits
+
+
+def set_area_overlaps(ids, tasks):
+    """Pairs among ``ids`` whose areas overlap, regardless of status."""
+    by_id = {t["id"]: t for t in tasks}
+    seen = []
+    for i in ids:
+        if i not in seen:
+            seen.append(i)
+    pairs = []
+    for i, a in enumerate(seen):
+        ta = by_id.get(a)
+        if ta is None:
+            continue
+        aa = split_areas(ta.get("area", ""))
+        for b in seen[i + 1:]:
+            tb = by_id.get(b)
+            if tb is None:
+                continue
+            if task_areas_overlap(aa, split_areas(tb.get("area", ""))):
+                pairs.append((ta, tb))
+    return pairs
+
+
+def format_area_collisions(task, blockers):
+    label = task.get("area") or "(untagged)"
+    head = f"T{task['id']} {label}"
+    if not blockers:
+        return f"{head} — clear"
+    bits = []
+    for o in blockers:
+        oa = o.get("area") or "(untagged)"
+        bits.append(f"T{o['id']} {o['status']} ({oa})")
+    return f"{head} — blocked: {', '.join(bits)}"
+
+
+def watch_collision_line(tid, tasks):
+    task = next((t for t in tasks if t["id"] == tid), None)
+    if task is None:
+        return f"T{tid} — no such task"
+    return format_area_collisions(task, in_flight_area_collisions(task, tasks))
+
+
+def parse_watch_tid(buf):
+    """Digits, optional leading t/T. None if not an id."""
+    s = buf.strip()
+    if s[:1] in "tT":
+        s = s[1:]
+    if not s.isdigit():
+        return None
+    return int(s)
 
 
 def append_body(body, text):
@@ -1735,6 +1939,16 @@ def cmd_cleanup(args):
     cleanup_task_artifacts(root, scope, meta, branch)
 
 
+def note_version_intent(intent, integration, product):
+    """Post-land bump reminder. No-op when intent is missing or none."""
+    if not intent or intent.lower() == "none":
+        return
+    print(f"note: Version intent is '{intent}' — apply one bump "
+          f"on '{integration}' when this set is done (per product "
+          f"versioning docs)")
+    print(f"  product: {product}")
+
+
 def cmd_land(args):
     """Post-approval land: destack children, rebase if needed, merge, cleanup.
 
@@ -1789,10 +2003,8 @@ def cmd_land(args):
         # Re-read meta so status=done is visible; cleanup still keys off PR.
         meta = find_task(bw, scope, tid)
         cleanup_task_artifacts(root, scope, meta, branch)
-        if intent and intent.lower() != "none":
-            print(f"note: Version intent is '{intent}' — apply one bump "
-                  f"on '{integration}' when this set is done (per product "
-                  f"versioning docs)")
+        note_version_intent(intent, integration,
+                            os.path.abspath(product_root(root, scope)))
         print(f"T{tid}: done")
         return
 
@@ -1876,10 +2088,8 @@ def cmd_land(args):
     mark_task_done(root, scope, integration, bw, meta)
     meta = find_task(bw, scope, tid)
     cleanup_task_artifacts(root, scope, meta, branch)
-    if intent and intent.lower() != "none":
-        print(f"note: Version intent is '{intent}' — apply one bump "
-              f"on '{integration}' when this set is done (per product "
-              f"versioning docs)")
+    note_version_intent(intent, integration,
+                        os.path.abspath(product_root(root, scope)))
     print(f"T{tid}: landed and done")
 
 
@@ -3060,13 +3270,15 @@ def cmd_init(args):
         branch = git("rev-parse", "--abbrev-ref", "HEAD", cwd=root).stdout.strip()
     write_cache(root, scope, branch)
     # immediate local ignore, without dirtying any branch (.dev/ and TASKS.md
-    # match any depth — product-local paths are covered)
+    # match any depth — product-local paths are covered). Viewer ignore is
+    # path-anchored and omitted when <product>/board is already a directory.
+    dest = viewer_path(root, scope)
+    ignore_lines = [".dev/", "TASKS.md"]
+    if not os.path.isdir(dest):
+        ignore_lines.append(viewer_ignore_line(scope))
     exclude = git_path(root, "info/exclude")
-    existing = open(exclude).read() if os.path.exists(exclude) else ""
-    with open(exclude, "a") as f:
-        for line in (".dev/", "TASKS.md"):
-            if line not in existing.splitlines():
-                f.write(line + "\n")
+    for line in ignore_lines:
+        append_ignore_line(exclude, line)
     branch, bw = resolve_board(root, scope)
     if not os.path.exists(board_yml_path(bw, scope)):
         os.makedirs(os.path.join(bw, tdir(scope)), exist_ok=True)
@@ -3076,13 +3288,8 @@ def cmd_init(args):
                "integrator": args.name, "contributors": args.name}
         write_board_cfg(bw, scope, cfg)
         gi = os.path.join(bw, ".gitignore")
-        gi_existing = open(gi).read() if os.path.exists(gi) else ""
-        with open(gi, "a") as f:
-            if gi_existing and not gi_existing.endswith("\n"):
-                f.write("\n")
-            for line in (".dev/", "TASKS.md"):
-                if line not in gi_existing.splitlines():
-                    f.write(line + "\n")
+        for line in ignore_lines:
+            append_ignore_line(gi, line)
         board_commit(root, branch, bw, scope, f"dev: init task board ({scope})")
         print(f"initialized board '{scope}' on '{branch}' (integrator: {args.name})")
     else:
@@ -3094,6 +3301,16 @@ def cmd_init(args):
             board_commit(root, branch, bw, scope,
                          f"dev: register contributor {args.name}")
         print(f"joined board '{scope}' on '{branch}'")
+        gi = os.path.join(bw, ".gitignore")
+        if (not os.path.isdir(dest)
+                and append_ignore_line(gi, viewer_ignore_line(scope))):
+            board_commit(root, branch, bw, scope,
+                         "dev: ignore local board viewer")
+    dest, _wrote = ensure_board_viewer(root, scope)
+    if os.path.isdir(dest):
+        print(f"viewer: skipped ({VIEWER_NAME} is a directory)")
+    else:
+        print(f"viewer: ./{VIEWER_NAME}  (r refresh, a by area, q quit, type id↵)")
     print(f"identity: {args.name}")
     if scope != ".":
         print(f"note: commands target this board from inside '{scope}/' "
@@ -3340,6 +3557,38 @@ def cmd_list(args):
             print(fmt_line(t, tasks))
 
 
+def cmd_collisions(args):
+    """Area occupancy vs doing/review. Exit 2 if any id is blocked.
+
+    One id matches watch-mode. Several ids: each vs in-flight *outside*
+    the set (batch peers are sequential); then ``set:`` lines for
+    in-set area overlap (informational, does not fail).
+    """
+    root, scope, branch, bw = ctx()
+    tasks = all_tasks(bw, scope)
+    ids = parse_id_list(" ".join(args.ids))
+    if not ids:
+        sys.exit("error: collisions needs at least one task id")
+    by_id = {t["id"]: t for t in tasks}
+    missing = [i for i in ids if i not in by_id]
+    if missing:
+        sys.exit("error: no task with id " +
+                 ",".join(str(i) for i in missing))
+    exclude = ids if len(ids) > 1 else None
+    blocked = False
+    for tid in ids:
+        task = by_id[tid]
+        hits = in_flight_area_collisions(task, tasks, exclude_ids=exclude)
+        print(format_area_collisions(task, hits))
+        if hits:
+            blocked = True
+    if len(ids) > 1:
+        for a, b in set_area_overlaps(ids, tasks):
+            print(f"set: T{a['id']} overlaps T{b['id']}")
+    if blocked:
+        sys.exit(2)
+
+
 def fmt_line(t, tasks):
     by_id = {x["id"]: x for x in tasks}
     blocked = any(by_id.get(d, {}).get("status") != "done" for d in t["deps"])
@@ -3358,41 +3607,70 @@ def fmt_line(t, tasks):
     return " ".join(parts)
 
 
-def _board_task_line(t, tasks):
-    mark = {"done": "x", "not-planned": "~", "later": "-"}.get(t["status"], " ")
-    return f"- [{mark}] {fmt_line(t, tasks)}"
+def _status_label(status):
+    return STATUS_LABEL.get(status, status.capitalize())
 
 
-def _board_by_status(tasks, covered):
-    lines = []
+def _fmt_ids(col):
+    return " ".join(f"T{t['id']}" for t in col)
+
+
+def _fmt_count(col):
+    return f"({len(col)})"
+
+
+def _index_block(rows):
+    """One line per (label, rhs) row; labels padded to a shared width."""
+    if not rows:
+        return []
+    width = max(len(label) for label, _ in rows)
+    return [f"{label:<{width}}  {rhs}".rstrip() for label, rhs in rows]
+
+
+def _list_block(visible, tasks, expand=False):
+    """In-play tasks one per line; --expand includes done/later/not-planned."""
+    rank = {s: i for i, s in enumerate(STATUSES)}
+    listed = [t for t in visible if expand or t["status"] not in TERMINAL]
+    listed.sort(key=lambda t: (rank.get(t["status"], 99), t["id"]))
+    return [fmt_line(t, tasks) for t in listed]
+
+
+def _board_by_status(tasks, covered, expand=False):
+    visible = [t for t in tasks if t["id"] not in covered]
+    rows = []
     for status in STATUSES:
-        col = [t for t in tasks if t["status"] == status
-               and t["id"] not in covered]
-        # Column count: visible rows (collapsed view hides umbrella children).
-        if status in OUT_OF_PLAY and not col:
-            continue  # no empty column for parked / rejected
-        label = STATUS_LABEL.get(status, status.capitalize())
-        lines.append(f"## {label} ({len(col)})")
-        for t in col:
-            lines.append(_board_task_line(t, tasks))
+        col = [t for t in visible if t["status"] == status]
+        if not col:
+            continue
+        fold = status in TERMINAL and not expand
+        rhs = _fmt_count(col) if fold else _fmt_ids(col)
+        rows.append((_status_label(status), rhs))
+    lines = _index_block(rows)
+    listed = _list_block(visible, tasks, expand=expand)
+    if listed:
         lines.append("")
+        lines.extend(listed)
     return lines
 
 
-def _board_by_area(bw, scope, tasks, covered):
+def _board_by_area(bw, scope, tasks, covered, expand=False):
     """Group visible tasks by area. Multi-area tasks appear under each area.
 
-    Column order: areas.md order, then other named areas (sorted), then
+    Index order: areas.md order, then other named areas (sorted), then
     reserved `all`, then untagged. Empty named areas from areas.md are kept
     so the cut shows the full map; empty ad-hoc / all / untagged are omitted.
+    Default keeps done/later/not-planned off area lines (own count rows)
+    so open work stays scannable; --expand puts those ids on area lines too.
     """
     visible = [t for t in tasks if t["id"] not in covered]
+    indexed = visible if expand else [
+        t for t in visible if t["status"] not in TERMINAL]
     known = list(read_areas(bw, scope).keys())  # insertion order
     buckets = {name: [] for name in known}
     ad_hoc = {}  # area -> [tasks], excluding known and reserved
     all_col = []
     untagged = []
-    for t in visible:
+    for t in indexed:
         areas = split_areas(t.get("area", ""))
         if not areas:
             untagged.append(t)
@@ -3404,33 +3682,27 @@ def _board_by_area(bw, scope, tasks, covered):
                 buckets[a].append(t)
             else:
                 ad_hoc.setdefault(a, []).append(t)
-    lines = []
-    for name in known:
-        col = buckets[name]
-        lines.append(f"## {name} ({len(col)})")
-        for t in col:
-            lines.append(_board_task_line(t, tasks))
-        lines.append("")
-    for name in sorted(ad_hoc):
-        col = ad_hoc[name]
-        lines.append(f"## {name} ({len(col)})")
-        for t in col:
-            lines.append(_board_task_line(t, tasks))
-        lines.append("")
+    rows = [(name, _fmt_ids(buckets[name])) for name in known]
+    rows.extend((name, _fmt_ids(ad_hoc[name])) for name in sorted(ad_hoc))
     if all_col:
-        lines.append(f"## all ({len(all_col)})")
-        for t in all_col:
-            lines.append(_board_task_line(t, tasks))
-        lines.append("")
+        rows.append(("all", _fmt_ids(all_col)))
     if untagged:
-        lines.append(f"## (untagged) ({len(untagged)})")
-        for t in untagged:
-            lines.append(_board_task_line(t, tasks))
+        rows.append(("(untagged)", _fmt_ids(untagged)))
+    if not expand:
+        for status in TERMINAL:
+            col = [t for t in visible if t["status"] == status]
+            if col:
+                rows.append((_status_label(status), _fmt_count(col)))
+    lines = _index_block(rows)
+    listed = _list_block(visible, tasks, expand=expand)
+    if listed:
         lines.append("")
+        lines.extend(listed)
     return lines
 
 
-def cmd_board(args):
+def _render_board(args):
+    """Fetch, write TASKS.md, return (board text, tasks)."""
     root, scope, branch, bw = ctx()
     cfg = read_board_cfg(bw, scope)
     tasks = all_tasks(bw, scope)
@@ -3444,13 +3716,178 @@ def cmd_board(args):
         title += " · by area"
     lines = [title, ""]
     if by_area:
-        lines.extend(_board_by_area(bw, scope, tasks, covered))
+        lines.extend(_board_by_area(bw, scope, tasks, covered, expand=expand))
     else:
-        lines.extend(_board_by_status(tasks, covered))
+        lines.extend(_board_by_status(tasks, covered, expand=expand))
     out = "\n".join(lines)
     with open(os.path.join(root, scope, "TASKS.md"), "w") as f:
         f.write(out)
-    print(out.rstrip())
+    return out.rstrip(), tasks
+
+
+def _clear_screen():
+    sys.stdout.write("\033[2J\033[H")
+    sys.stdout.flush()
+
+
+def _read_key(cooked=True):
+    """One key from a tty; first character of a line otherwise.
+
+    Read the fd directly — sys.stdin's buffer can swallow the key after
+    switching the tty out of canonical mode. Escape consumes a following
+    CSI/SS3 so arrow keys do not leak as a/A/q (see `_read_tty_byte`).
+
+    Watch mode holds cbreak for the session (`cooked=False`) so digits typed
+    during a repaint are not trapped in the line buffer.
+    """
+    if not sys.stdin.isatty():
+        line = sys.stdin.readline()
+        return line[:1] if line else "q"
+    fd = sys.stdin.fileno()
+    if cooked:
+        try:
+            import termios
+            import tty
+        except ImportError:
+            line = input()
+            return line[:1] if line else ""
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            ch = _read_tty_byte(fd)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    else:
+        ch = _read_tty_byte(fd)
+    if not ch:
+        return "q"
+    key = ch.decode("utf-8", "replace")
+    if key == "\x04":  # Ctrl-D
+        return "q"
+    return key
+
+
+_tty_unread = None  # one leftover byte after a lone ESC (not a CSI)
+
+
+def _read_tty_byte(fd):
+    """One byte. ESC consumes a queued CSI/SS3 so arrows do not leak.
+
+    Arrow keys arrive as one burst (ESC [ A). A lone Escape has nothing
+    waiting. Do not time-drain the buffer: that eats the next typed digit.
+    A short poll lets a CSI split across an SSH packet still attach; a
+    non-CSI byte after ESC is unread for the next call.
+    """
+    global _tty_unread
+    if _tty_unread is not None:
+        ch = _tty_unread
+        _tty_unread = None
+        return ch
+    ch = os.read(fd, 1)
+    if ch != b"\x1b":
+        return ch
+    import select
+    if not select.select([fd], [], [], 0.025)[0]:
+        return ch
+    nxt = os.read(fd, 1)
+    if nxt not in (b"[", b"O"):
+        _tty_unread = nxt
+        return ch
+    # CSI / SS3: optional parameter bytes, then a final byte in 0x40–0x7E.
+    while True:
+        if not select.select([fd], [], [], 0.025)[0]:
+            break
+        extra = os.read(fd, 1)
+        if not extra or (0x40 <= extra[0] <= 0x7E):
+            break
+    return ch
+
+
+def _paint_watch(out, by_area, buf, result):
+    _clear_screen()
+    print(out)
+    print()
+    other = "by status" if by_area else "by area"
+    print(f"r refresh  a {other}  q quit  · type id↵")
+    if buf:
+        print(f"> {buf}")
+    if result:
+        print(result)
+    sys.stdout.flush()
+
+
+def cmd_board(args):
+    root, scope, _branch, _bw = ctx()
+    _, wrote = ensure_board_viewer(root, scope)
+    watch = bool(getattr(args, "watch", False))
+    if wrote and not (watch and sys.stdin.isatty()):
+        print(f"viewer: refreshed ./{VIEWER_NAME}")
+    if watch and sys.stdin.isatty():
+        fd = sys.stdin.fileno()
+        old_term = None
+        try:
+            import termios
+            import tty
+            old_term = termios.tcgetattr(fd)
+            tty.setcbreak(fd)
+        except ImportError:
+            pass
+        buf = ""
+        result = ""
+        last_tid = None
+        try:
+            while True:
+                by_area = bool(getattr(args, "by_area", False))
+                out, tasks = _render_board(args)
+                if last_tid is not None:
+                    result = watch_collision_line(last_tid, tasks)
+                while True:
+                    _paint_watch(out, by_area, buf, result)
+                    key = _read_key(cooked=old_term is None)
+                    if key in ("q", "Q"):
+                        return
+                    if key in ("r", "R"):
+                        buf = ""
+                        break
+                    if key in ("a", "A"):
+                        buf = ""
+                        args.by_area = not by_area
+                        break
+                    if key == "\x1b":
+                        buf = ""
+                        result = ""
+                        last_tid = None
+                        continue
+                    if key in ("\x7f", "\x08"):
+                        buf = buf[:-1]
+                        continue
+                    if key in ("\n", "\r"):
+                        if not buf:
+                            continue
+                        tid = parse_watch_tid(buf)
+                        buf = ""
+                        if tid is None:
+                            result = "not a task id"
+                            last_tid = None
+                            continue
+                        out, tasks = _render_board(args)
+                        last_tid = tid
+                        result = watch_collision_line(tid, tasks)
+                        continue
+                    if not buf and key in "tT":
+                        buf = key
+                        continue
+                    if key.isdigit() and len(buf) < 8:
+                        buf += key
+                        continue
+        except KeyboardInterrupt:
+            print()
+        finally:
+            if old_term is not None:
+                import termios
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
+        return
+    print(_render_board(args)[0])
 
 
 # ---------- iterations ----------
@@ -3769,12 +4206,23 @@ def main():
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_list)
 
-    s = sub.add_parser("board", help="print kanban view; regenerate TASKS.md")
+    s = sub.add_parser("collisions",
+                       help="area occupancy vs doing/review (exit 2 if blocked)")
+    s.add_argument("ids", nargs="+",
+                   help="task id(s), e.g. 12 or 12,15,18")
+    s.set_defaults(fn=cmd_collisions)
+
+    s = sub.add_parser("board", help="print board view; regenerate TASKS.md")
     s.add_argument("--expand", action="store_true",
-                   help="list all tasks flat (do not collapse umbrella children)")
+                   help="list umbrella children and done/later/not-planned "
+                        "(default folds both)")
     s.add_argument("--by-area", action="store_true",
-                   help="group by area instead of status (multi-area tasks "
+                   help="index by area instead of status (multi-area tasks "
                         "listed under each area)")
+    s.add_argument("--watch", action="store_true",
+                   help="interactive: r refresh, a toggle by-area, "
+                        "q quit, type id+Enter for area collisions "
+                        "(used by ./board)")
     s.set_defaults(fn=cmd_board)
 
     s = sub.add_parser("iteration", help="show current iteration")

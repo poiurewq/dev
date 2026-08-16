@@ -29,11 +29,11 @@ or reset the local integration branch — that is human-only
    report, continue.
 2. **Select**: from `TASKS list --json`, candidates are `backlog` tasks,
    unassigned, no `needs` flag, all deps `done`. Exclude on **area grounds**
-   (collision rule: SKILL.md *Area stewardship*): skip candidates overlapping
-   another contributor's `doing` task or any `review` task — surface the
-   overlapping review ids/`pr` in the skip report, board fields only, not a
-   GitHub PR sweep — and never select an `all` task (those wait for a
-   human-supervised quiet board). **Area sanity**: if the recorded area is
+   (`TASKS collisions <id>` / SKILL.md *Area stewardship*): exit 2 → skip,
+   surface the output (any assignee's `doing` or `review`, including this
+   auto identity's other work). Never pass several candidates as one
+   collisions set — that would treat them as batch peers. Never select an
+   `all` task (those wait for a human-supervised quiet board). **Area sanity**: if the recorded area is
    clearly wrong for what the code now requires, fix it and note why in one
    call (`TASKS update <id> --area "<better>" --append "<why>"`); if the
    right area is genuinely debatable, treat it as a design fork (flag
