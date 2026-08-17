@@ -16,107 +16,55 @@ file and follow it — don't improvise the flow.
 targets the nearest board at or above cwd, or `--scope <subdir>`; there is no
 single-board fallback, so monorepo work runs from the product directory.
 `SKILL_CMD` = `python3 SKILL_DIR/scripts/skill.py` — acts on the installed
-skill, not the board (see Skill commands).
+skill, not the board (`flows/skill.md`).
 
 ## Script synopsis
 
-Use these exact invocation patterns — don't guess flags:
+`--scope` goes BEFORE the subcommand. Don't guess flags. This index is
+enough for names; full flag wall is `flows/cli.md` — load it only when a
+flag is not already spelled here or in the flow you are following.
 
 ```
-TASKS --scope <subdir> <subcommand> ...   # target another board in the repo
-                                          # (goes BEFORE the subcommand)
+TASKS --scope <subdir> <subcommand> ...
 TASKS init --name <handle> [--scope <subdir>] [--integration <branch>]
-           [--parent <branch>] [--iteration <name>]
-TASKS whoami                            # this checkout's identity (exits
-                                        # nonzero if not set)
-TASKS config [<key> [<value>]]          # settable: integrator, parent_branch,
-                                        # iteration (rename; date-prefix like
-                                        # init, keeping current date; refused
-                                        # once closed-not-landed)
-TASKS area list
-TASKS area set <name> [--desc "<one-line scope>"]
-TASKS area rm <name> [--force]
+           [--parent <branch>] [--iteration N] [--iteration-name <name>]
+           [--iteration-started YYYY-MM-DD]
+TASKS whoami
+TASKS config [<key> [<value>]]          # integrator, parent_branch, iteration,
+                                        # iteration_name, iteration_started
+TASKS area list | set <name> [--desc "<one-line scope>"] | rm <name> [--force]
 TASKS add --title "<title>" [--area <m>] [--deps <id,id>]
           [--desc "<1–3 sentences>"] [--assignee <who>]
-          [--kind umbrella]                     # empty = normal
-          [--status proposed|backlog|planned|later]  # default backlog
-TASKS update <id> [--title "<t>"] [--area <m>] [--status <s>]
-          [--kind umbrella|""] [--assignee <who>|""] [--branch <b>|""]
-          [--pr <url>] [--needs decision|""] [--deps <id,id>]
-          [--append "<paragraph>"]              # add to body, keeping it
-          [--desc "<new body>"]                 # REPLACE whole body
-          [--status later]                      # park for a later iteration
-          [--status not-planned --reason "<why>"]   # reason is required
+          [--kind umbrella] [--status proposed|backlog|planned|later]
+TASKS update <id> [--title] [--area] [--status] [--kind umbrella|""]
+          [--assignee <who>|""] [--branch <b>|""] [--pr]
+          [--needs decision|""] [--deps] [--append "<paragraph>"]
+          [--desc "<new body>"]
+          [--status later] [--status not-planned --reason "<why>"]
 TASKS delete <id>
 TASKS show <id>
-TASKS collisions <id[,id…]>             # area occupancy vs doing/review;
-                                        # multi-id also prints in-set overlap;
-                                        # exit 2 if any id is in-flight-blocked
-                                        # (batch peers excluded from that check)
-TASKS related "<text>"                  # existing tasks similar to <text>;
-                                        # run before every add
+TASKS collisions <id[,id…]>             # exit 2 if in-flight-blocked
+TASKS related "<text>"                  # run before every add
 TASKS list [--assignee <who>] [--status <s>] [--needs decision] [--json]
 TASKS board [--expand] [--by-area] [--watch]
-                                        # index: one line per status (or
-                                        # area) of task ids; then in-play
-                                        # tasks one per line. collapses
-                                        # umbrella children; done/later/
-                                        # not-planned fold to a count;
-                                        # --expand lists children and those
-                                        # three; --watch: r/a/q, type id↵
-                                        # for area collisions (./board)
 TASKS iteration
 TASKS iteration-close [--force]
 TASKS iteration-new <branch> [--parent <branch>] [--name <name>]
+                    [--iteration N] [--iteration-started YYYY-MM-DD]
 TASKS iteration-land [--create-only] [--title T] [--body B]
-                                        # open/merge iteration PR into parent
-                                        # with merge commit (not squash)
 TASKS claim <id> [--assignee <who>] [--branch <b>]
-                                        # branch from origin/integration
-                                        # (ff empty leftover; refuse if
-                                        # diverged), always a linked
-                                        # worktree under .dev/worktrees
-                                        # (primary stays hub), status=doing;
-                                        # prints workdir + product + verified
-                                        # base (edit + compile/test/run in product)
-TASKS diff <id>                         # location + review diff from the
-                                        # task worktree (not session cwd);
-                                        # implement self-review / resume
+                                        # refuse if diverged or untagged
+TASKS diff <id>
 TASKS ship <id> --shipped "<what actually shipped>"
                 [--message M] [--title T] [--body B]
                 [--version-intent <intent>] [--base <branch>]
-                [--batch <id,id,…>]     # commit if dirty ([T<id>] prefix),
-                                        # push, gh pr create if none open,
-                                        # status=review + pr URL. Re-ship
-                                        # reuses the open PR, so --title /
-                                        # --body / --version-intent / --base
-                                        # apply on create only.
-                                        # --shipped is REQUIRED on every ship
-                                        # (result, not plan): appended to the
-                                        # task body as Shipped (<date>): … and
-                                        # mirrored onto the PR body each ship.
-                                        # --version-intent has no default;
-                                        # --base stacks; --batch stamps
-                                        # Dev-batch on PR + task body
-TASKS batch-gate --ids <id,id,…>        # exit 2 if selection omits open
-                                        # co-members of a Dev-batch/stack
+                [--batch <id,id,…>]
+TASKS batch-gate --ids <id,id,…>
 TASKS restack --ids <id,id,…> [--after N] [--onto <ref>]
-              [--retarget] [--dry-run]  # fail-closed stack rebase (plan,
-                                        # then apply unless --dry-run);
-                                        # auto-retargets PR base to
-                                        # integration when the stack parent
-                                        # is outside the set; --onto rebases
-                                        # every target onto that ref (no
-                                        # cascade — the default keeps in-set
-                                        # stack parents); destack onto a
-                                        # new base excludes the old parent
-                                        # tip (no squash replay)
-TASKS preflight [--park|--discard]      # local integration ahead of origin
-                                        # (check exits 2 if in-scope ahead;
-                                        # --park / --discard are interactive)
-TASKS land <id>                         # post-approval: destack children
-                                        # first, then merge, cleanup, done
-TASKS cleanup <id>                      # worktree + branch prune (branch only if PR MERGED)
+              [--retarget] [--dry-run]
+TASKS preflight [--park|--discard]
+TASKS land <id>
+TASKS cleanup <id>
 ```
 
 Caveats: `--append` adds to a body (no prior `show` needed, can't truncate);
@@ -194,14 +142,18 @@ away, or paper over it with manual git/gh.
 
 - `<scope>/.tasks/` — tracked, lives only on that board's integration
   branch: `NNN.md` (one file per task), `board.yml` (`schema_version`,
-  integration_branch, parent_branch, iteration, integrator, contributors),
-  `areas.md` (area names + one-line scopes), `log.md` (past-iteration
-  index), `archive/<iteration>/NNN.md` (every closed task, verbatim — the
-  full record the log only indexes). Iteration names are stored as
-  `<YYYY-MM-DD>-<name>` (start date, applied at every setter), so
-  archive dirs and log sections stay in the order they happened. Missing
-  `schema_version` means 0; see product `AGENTS.md` for compatibility rules
-  when changing board schema.
+  integration_branch, parent_branch, iteration, iteration_name,
+  iteration_started, integrator, contributors), `areas.md` (area names +
+  one-line scopes), `log.md` (past-iteration index),
+  `archive/<n>-<slug>/NNN.md` (every closed task, verbatim — the full
+  record the log only indexes; dir is `archive/<n>/` when unnamed).
+  `iteration` is a positive integer (identity, default 1 at init);
+  `iteration_name` is an optional display label; `iteration_started` is
+  `YYYY-MM-DD` (stamped at init / iteration-new, settable to match an
+  external calendar). Close records both dates as `started:` / `closed:`
+  lines under `## <n>` (or `## <n> — <name>`). Ship titles PRs
+  `[n/T<id>] …`. Missing `schema_version` means 0; see product
+  `AGENTS.md` for compatibility rules when changing board schema.
   Task frontmatter may carry `kind` (`umbrella` = goal parent; absent/empty
   = normal). An umbrella's `deps` are its **direct children** (leaves or
   nested umbrellas) — hierarchy is the dep graph among `kind: umbrella`
@@ -233,8 +185,8 @@ awaiting a human call, detailed in the task body.
 
 | Invocation | Action |
 |---|---|
-| `/dev` (bare) | First contact, below. |
-| `/dev help` | Full options table (below). No board/identity → same setup path as bare. |
+| `/dev` (bare) | Read `flows/first-contact.md`. |
+| `/dev help` | Read `flows/first-contact.md`. No board/identity → same setup path as bare. |
 | `/dev init` | Read `flows/init.md` (identity, board creation/adoption, gh setup, areas). |
 | `/dev add <task-or-goal>` | Read `flows/add.md` (triage, then direct add, plan, or shape). |
 | `/dev plan <goal>` | Alias of `/dev add` (same triage). |
@@ -252,12 +204,12 @@ awaiting a human call, detailed in the task body.
 | `/dev delete <id>` | Confirm, then `TASKS delete <id>`. |
 | `/dev drop <id>` / "we're not doing this" | Not planned, below — offer delete as the alternative and let the user pick. |
 | `/dev show <id>` | `TASKS show <id>`. |
-| `/dev config [key] [value]` | `TASKS config ...` (settable: integrator, parent_branch, iteration). |
+| `/dev config [key] [value]` | `TASKS config ...` (settable: integrator, parent_branch, iteration, iteration_name, iteration_started). |
 | `/dev area ...` | Area stewardship, below. |
-| `/dev skill` | `SKILL_CMD status` — version, auto-update state, skill commands. |
-| `/dev skill update` | `SKILL_CMD update` — pull latest skill from github.com/poiurewq/dev. |
-| `/dev skill update auto on/off` | `SKILL_CMD auto on/off` — opt-in auto-apply on checks. |
-| `/dev skill feedback <text>` | Read **Skill commands** below — send a bug or idea **about the dev skill** to its maintainers as a public GitHub issue. |
+| `/dev skill` | Read `flows/skill.md` (`SKILL_CMD status`). |
+| `/dev skill update` | Read `flows/skill.md` (`SKILL_CMD update`). |
+| `/dev skill update auto on/off` | Read `flows/skill.md` (`SKILL_CMD auto on/off`). |
+| `/dev skill feedback <text>` | Read `flows/skill.md`. |
 
 Before any board operation, check identity with `TASKS whoami` — never probe
 the filesystem for it yourself. Identity is **product-local**
@@ -269,100 +221,16 @@ nothing matches, run the `/dev add` path first (`flows/add.md`), then
 continue implement on the new task(s) — details in `flows/implement.md`.
 Other id-or-desc commands (`pick`, `show`, …) still require a match.
 
-## Skill commands (`/dev skill ...`)
+## Skill check
 
-Everything under `/dev skill` acts on the **installed skill**, never on the
-user's board or repo. Keep the two apart when you speak: `/dev review` is
-feedback on *their* work; `/dev skill feedback` is feedback on *this tool*.
-
-Public installs are a **git clone** of https://github.com/poiurewq/dev into an
-agent skills dir. Prefs live at `~/.config/dev-skill/config.yml` (survives
-pulls; `schema_version` like board.yml — see `scripts/skill.py`).
-
-**Throttled check** — run `SKILL_CMD check` once at the start of bare `/dev`,
-`/dev help`, `/dev init`, `/dev add` (including freeform add and `/dev
-plan`), `/dev board` / `kanban`, `/dev implement`, `/dev review`, and
-`/dev meta`. It runs
-at most every 24h and stays silent when the local version is current or the
-network fails; a missing local `VERSION` counts as `0.0.0`. Show any line it
-prints (one quiet line) and continue the command — never block board work on
-it. With auto-update on, the check may apply a pull and print one
-success/failure line.
-
-Command→script mapping is in the routing table above, plus two forms it
-omits: bare `/dev skill update auto` → `SKILL_CMD auto` (reports the current
-setting), and `/dev skill feedback <text>` →
-`SKILL_CMD feedback --title "<t>" [--body "<b>"]`.
-
-### Feedback to the maintainers (`/dev skill feedback`)
-
-Opens an issue on poiurewq/dev — the maintainer inbox for the skill itself.
-Not for the user's own repo, and not a way to file board tasks (that is
-`/dev add <task-or-goal>`); if the user seems to mean their own work, ask
-before filing.
-
-Draft a title (one line) and body (the behaviour they saw and what they
-expected) from what the user said. **Show the draft and get their OK before
-running the command**, and say plainly what it does: files a GitHub issue on
-the public poiurewq/dev repo, which cannot be quietly undone. The script
-appends skill version, install kind, python, and OS. Never put repo names,
-paths, branch names, or task content in the title or body — this is a public
-repo. Report the issue URL the script prints.
-
-## First contact (bare `/dev`)
-
-Classify with two script calls — `TASKS board` (board?) and `TASKS whoami`
-(identity?):
-
-- **Board exists** (and identity set): show `TASKS board`, then **context
-  options only** (below) — never the full options table, and no per-command
-  commentary. Close with one line that `/dev help` has the complete menu.
-- **No board** — assume the user knows nothing beyond the name. Read
-  `flows/init.md` and deliver its step-0 welcome **verbatim** (it exists so
-  every agent gives the same first impression — don't improvise your own),
-  then run the init flow if they accept. Don't dump the full command
-  reference on them; they'll learn verbs as they need them.
-- **Board exists but no identity** (new contributor): skip the sales pitch —
-  one line ("this repo runs its task board with dev; let's get you on it"),
-  then the init flow's identity/join steps.
-
-### Context options (bare only; after identity)
-
-From board state (and a light PR refresh on `review` tasks if useful), emit
-only the lines that apply — short command shapes, ids filled in when known.
-Skip categories that don't apply; do not pad toward a full menu.
-
-| When | Offer |
-|---|---|
-| Open forks (`needs: decision`), `proposed` tasks, or open PRs you may merge | `/dev review` |
-| Your `doing` / `planned` / `review` work | `/dev status` · `/dev implement <id>` (or resume note for `review`) |
-| Unassigned backlog and a quiet plate | 1–2 unblocked candidates via `/dev pick <id>` or `/dev implement <id>` |
-| No open work on the board | `/dev add <task-or-goal>` |
-
-Prefer the highest-signal row(s); one or two lines is enough. Always end with
-the `/dev help` hint.
-
-## `/dev help`
-
-When board and identity exist: emit the options table **verbatim** (below),
-plus an optional one-liner that bare `/dev` is board + next steps — nothing
-else. No board, or board without identity: same setup path as bare first
-contact (welcome / join) — don't show the table before the board is usable.
-
-### Options table (reproduce as-is)
-
-Every agent shows the same menu, so the user learns one map of the tool.
-Emit it whole — don't reorder, trim to "what's relevant", or annotate.
-
-| | |
-|---|---|
-| **See** | `/dev board` — the whole board (status) · `/dev board --by-area` — cut by area · `/dev status` — your plate · `/dev show <id>` — one task |
-| **Add work** | `/dev add <task-or-goal>` — file a task, or work a goal or pile of threads onto the board · `/dev absorb <file>` — import an existing list |
-| **Do work** | `/dev pick <id>` — claim it · `/dev implement <id[, id…]|goal>` — build it (or a batch) and open PR(s); unknown goal is filed via add triage first · `/dev auto` — hand one to an agent |
-| **Decide** | `/dev review` — PRs, design questions, and proposals waiting on you · `/dev meta` — pressure the board · `/dev meta area` — area-validity only |
-| **Adjust** | `/dev change <id> <what>` · `/dev delete <id>` · `/dev area` · `/dev config` |
-| **Iterate** | `/dev iteration` — show, close, or start the next one |
-| **Skill** | `/dev skill` — version and update state · `/dev skill update` — pull latest dev skill · `/dev skill update auto on/off` — opt-in auto-apply · `/dev skill feedback <text>` — file a bug or idea about the skill as an issue on its public repo |
+Run `SKILL_CMD check` once at the start of bare `/dev`, `/dev help`,
+`/dev init`, `/dev add` (including freeform add and `/dev plan`),
+`/dev board` / `kanban`, `/dev implement`, `/dev review`, and
+`/dev meta`. It runs at most every 24h and stays silent when the local
+version is current or the network fails; a missing local `VERSION` counts
+as `0.0.0`. Show any line it prints (one quiet line) and continue the
+command — never block board work on it. With auto-update on, the check
+may apply a pull and print one success/failure line.
 
 ## Not planned (inline)
 
@@ -385,55 +253,59 @@ later` → `TASKS update <id> --status later` (or `add --status later`). No
 `--reason`. Claim, ship, land, and auto refuse it. Iteration close treats it like
 not-planned (logged `[later]`, not unfinished). `iteration-new` re-adds
 archived later tasks with fresh ids, still later, plus a
-`carried from <old-iteration>/T<n>` note — no walk. Revive with
+`carried from <n>/T<id>` note — no walk. Revive with
 `--status backlog` or `/dev pick <id>`.
 
 ## Area stewardship (inline)
 
-Areas exist for **coordination**, not just labeling: contributors working in
-disjoint areas can't conflict, so dev steers concurrent work apart. A task's
-`area` may list several, comma-separated. Two tasks **collide** when any name
-on one **segment-prefix-overlaps** any name on the other: split on `/`;
-`flows` overlaps `flows/implement` and `flows/other`; `flows/implement` does
-not overlap `flows/review`; `flow` does not overlap `flows` (string prefix
-is the trap). The script owns this check (`areas_overlap` /
-`in_flight_area_collisions` in tasks.py); `TASKS collisions <id[,id…]>`
-and watch-mode type-id query it. On collision with in-flight (`doing`)
-work **or** `review` tasks — any assignee, including the current user —
-implement **aborts** (print the collisions output and stop; do not claim).
-Auto skips. A multi-id call excludes the other ids in the set from that
-fail check (batch members are sequential) and prints `set:` overlap
-lines as information only. Resume of one batch member uses that same
-set (`flows/implement.md`), not the single id. The reserved area
-**`all`** marks a task that may touch everything (wide refactors, some
-umbrellas): it collides with every task, so it runs only on an otherwise-
-quiet board (nothing in `doing` or `review`) with the user's explicit
-confirmation that other contributors are paused; auto never picks it, and
-it's never listed in areas.md.
+Areas are **coordination** locks, not labels. A task's `area` may list
+several, comma-separated. Two tasks **collide** when any name on one
+**segment-prefix-overlaps** any name on the other: split on `/`; `flows`
+overlaps `flows/implement` and `flows/other`; `flows/implement` does not
+overlap `flows/review`; `flow` does not overlap `flows` (string prefix is
+the trap). The script owns this (`areas_overlap` /
+`in_flight_area_collisions`); `TASKS collisions <id[,id…]>` and
+watch-mode type-id query it. Collision with any assignee's `doing` or
+`review` — including this user — **aborts** implement (print the output;
+do not claim). Auto skips. Untagged tasks skip that check (empty overlaps
+nothing except `all`), so `claim` refuses an empty area. Implement
+recommends a reuse or new name and waits; auto files the same as `needs:
+decision` (does not `area set` or tag until a human decides). Add may
+still leave area empty when a cluster cannot be named yet. No
+placeholder. A multi-id call excludes the other ids in the set from that
+fail check (batch members are sequential) and prints `set:` overlap lines
+as information only. Resume of one batch member uses that same set
+(`flows/implement.md`), not the single id. Reserved **`all`** marks a
+task that may touch everything (wide refactors, some umbrellas) and
+collides with every task: only on an otherwise-quiet board (nothing in
+`doing` or `review`) with the user's explicit confirmation that other
+contributors are paused; auto never picks it; never listed in areas.md.
 
-A name with `/` is a path: parents are implied by segments, with no parent
-field. A parent is a subtree-wide lock (`flows` = any/all `flows/*`) and is
-only assignable if it is listed in areas.md — do not invent it because a
+A name with `/` is a path; parents are implied by segments (no parent
+field). A parent is a subtree-wide lock (`flows` = any/all `flows/*`) and
+is only assignable if listed in areas.md — do not invent it because a
 directory exists. Tag the parent **or** the specific children, not both.
-Prefer the children so locks stay narrow; do not tag the parent because the
-work *might* go wide — widen at implement if a fork actually crosses them.
-Residuals that are not a named child go to `…/other` (`flows/other`), never
-the parent. A listed path-parent may itself be slash-free (`flows`) and
-still own `flows/*`. Conceptual names (`docs`, `ci`) stay slash-free and
-do not grow children — `docs`, not `docs/readme`.
+Prefer the children so locks stay narrow; do not tag the parent because
+the work *might* go wide — widen at implement if a fork actually crosses
+them (pause, update `--area`, re-run collisions before touching those
+files; collisions fail → revert `--area`, keep the `Decision:` for resume;
+auto files `needs: decision` instead — flows/implement.md). Residuals
+that are not a named child go to `…/other` (`flows/other`), never the
+parent. A listed path-parent may itself be slash-free (`flows`) and still
+own `flows/*`. Conceptual names (`docs`, `ci`) stay slash-free and do not
+grow children — `docs`, not `docs/readme`.
 
-There is no fixed upper bound on how many areas a board should have: more
-areas enable more concurrent work. The natural limiter is multi-area
-occupancy — prefer as many stable areas as enable parallelization without
-typical tasks needing many areas at once (over-granularity → confusing
-multi-area tags). Init proposes under that heuristic (flows/init.md).
+No fixed upper bound. Limiter is multi-area occupancy: as many stable
+areas as enable parallelization without typical tasks needing many at
+once (over-granularity → confusing multi-area tags). Init proposes under
+that heuristic (flows/init.md).
 
-Areas live in `.tasks/areas.md` via `TASKS area list|set|rm`. Names: when the
-work splits by path, prefer a repo-relative path or the shortest uniquely
-distinguishing portion (`cli`, `billing/api`) — no filename extensions
-(`flows/iteration`, not `flows/iteration.md`). Cross-cutting non-directory
-work still uses a short slash-free phrase (spaces fine). Form: no trailing
-`/`, no leading `./`, no `:` or `,`. The one-line `--desc` carries the rest.
+Areas live in `.tasks/areas.md` via `TASKS area list|set|rm`. Path-split
+work: repo-relative path or the shortest uniquely distinguishing portion
+(`cli`, `billing/api`) — no filename extensions (`flows/iteration`, not
+`flows/iteration.md`). Cross-cutting non-directory work: short slash-free
+phrase (spaces fine). Form: no trailing `/`, no leading `./`, no `:` or
+`,`. The one-line `--desc` carries the rest.
 
 `/dev area` with no args → `area list` only. Validity (stale names,
 path-renames, parent-used-as-residual, leftover extensions) lives under
@@ -441,9 +313,9 @@ path-renames, parent-used-as-residual, leftover extensions) lives under
 (without `--force`) match **exact names only** — a parent is not
 responsible for its children's tasks; later still occupies; not-planned
 does not. `TASKS board --by-area` indexes along the area axis: multi-area
-tasks appear on each listed area's id line, umbrellas collapse as on
-the status board, and done/later/not-planned fold to counts on last
-index lines.
+tasks appear on each listed area's id line, umbrellas collapse as on the
+status board, and done/later/not-planned fold to counts on last index
+lines.
 
 ## Status (`/dev status`)
 

@@ -43,7 +43,9 @@ locally and PRs are impossible, so implement and review can't run; help the
 user add one before going further.
 
 1. **Identity**: ask for a short stable handle (suggest one derived from
-   `git config user.name`). Identity is product-local
+   `git config user.name`, never from the board's integrator or
+   contributors — those identities are likely someone else). Identity
+   is product-local
    (`<scope>/.dev/identity`). Skip if that file already exists for the target
    product and the user isn't asking to change it. In a monorepo, each
    product board gets its own identity (same handle is fine — re-run init per
@@ -63,8 +65,10 @@ user add one before going further.
 4. **No board — adoption**:
    - *Integration branch*: propose the current or default branch; if the repo
      already uses iteration branches, ask which. Pass `--integration` (and
-     `--parent`, `--iteration` when applicable).
-   - Run `TASKS init --name <handle> [--scope s] [--integration b] [--parent p]`.
+     `--parent`, `--iteration N`, `--iteration-name`, `--iteration-started`
+     when applicable).
+   - Run `TASKS init --name <handle> [--scope s] [--integration b] [--parent p]
+     [--iteration N] [--iteration-name <name>] [--iteration-started YYYY-MM-DD]`.
      Init writes a gitignored `./board` viewer at the product root
      (`r` refresh, `a` toggle by-area, `q` quit) if missing, and refreshes
      it when it is still a stock wrapper. `TASKS board` does the same. A

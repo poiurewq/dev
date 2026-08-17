@@ -1,26 +1,30 @@
 # /dev iteration — show / close / new
 
-An iteration = one integration branch + its board. Numbering resets each
-iteration; cross-iteration references are `<iteration>/T<id>` (log.md lines
-are already written that way). Boards whose integration branch is `main` with
-no parent simply never close — fine for simple repos.
+An iteration = one integration branch + its board. Task ids reset each
+iteration; the iteration itself is a positive integer. Cross-iteration
+references are `<n>/T<id>` (log.md lines are already written that way).
+Boards whose integration branch is `main` with no parent simply never
+close — fine for simple repos.
 
-**Names carry their start date.** Every setter stores `<YYYY-MM-DD>-<name>`.
-`init` / `iteration-new` prefix today (or the branch name) unless the value
-already starts with an ISO date; `config iteration` keeps the current start
-date on rename, or prefixes today if the current name is undated. A value
-that already starts with an ISO date is stored as-is. That is what makes
-archive dirs and log.md sections reconstruct the order the project was built
-in — don't strip the date when referring to an iteration.
+**Identity is the integer.** `board.yml` `iteration` is `1`, `2`, `3`…
+(default 1 at init; `init --iteration N` to match a team already in
+progress). `iteration_name` is an optional display label. Archive dirs
+are `{n}-{slug}` (or `{n}` if unnamed); clash is on the number, not the
+slug. `iteration_started` is `YYYY-MM-DD`, stamped at init /
+iteration-new (today unless given) and settable so it can match an
+external calendar. Close writes `started:` / `closed:` lines under
+`## {n}` (or `## {n} — {name}`). Ship titles PRs `[n/T<id>] …`.
 
 ## `/dev iteration` — show
 
-`TASKS iteration`: scope, name, branch, parent, done/in-play
-(later omitted from the denominator).
+`TASKS iteration`: scope, index, display name, start date, branch,
+parent, done/in-play (later omitted from the denominator).
 
-To rename the current iteration: `TASKS config iteration <new-name>` (same
-normalization as above). Refused once the iteration is closed
-but not yet landed, since the land gate matches log.md's close heading.
+`TASKS config iteration <n>` renumbers the live iteration (refused if
+that number already has an archive). `config iteration_name` /
+`config iteration_started` adjust the label and start date. All three
+are refused once the iteration is closed but not yet landed, since the
+land gate matches log.md's `## {n}` heading.
 
 ## `/dev iteration close`
 
@@ -37,7 +41,7 @@ but not yet landed, since the land gate matches log.md's close heading.
    carry-over list — genuinely abandoned tasks should be `not-planned` first,
    and parked work should be `later` first, so `--force` covers only the
    leftover unfinished ones). This copies every task
-   file verbatim to `.tasks/archive/<iteration>/NNN.md` — the full record,
+   file verbatim to `.tasks/archive/<n>-<slug>/NNN.md` — the full record,
    greppable and browsable long after the iteration — and indexes them in
    `.tasks/log.md` (one line per task with area, PR, and `[not planned]` /
    `[later]` / `[unfinished: …]` flags, each task's `Shipped (<date>): …`
@@ -54,19 +58,21 @@ but not yet landed, since the land gate matches log.md's close heading.
 ## `/dev iteration new <branch>`
 
 1. After the close PR has merged — **enforced**, not just advised:
-   `TASKS iteration-new <branch> [--parent p] [--name n]` refuses while the
-   current integration branch is not yet contained in the parent, since the
-   new board starts from the parent and would otherwise be missing the last
-   iteration's archive and log.md close section. Land it first; there is no
-   override. This starts a fresh board on the new branch **and commits a
-   pointer to the parent's board.yml** so other contributors' stale checkouts
-   auto-resolve to the new iteration. That pointer commit pushes to the
-   parent — on a push-protected parent it will warn, and contributors then
-   need a one-time `TASKS init --integration <branch>`. It also refuses a name
-   whose archive dir already exists (a reused iteration name would overwrite
-   that iteration at close) — pick another `--name`; renaming is free here.
+   `TASKS iteration-new <branch> [--parent p] [--name n] [--iteration N]
+   [--iteration-started D]` refuses while the current integration branch is
+   not yet contained in the parent, since the new board starts from the
+   parent and would otherwise be missing the last iteration's archive and
+   log.md close section. Land it first; there is no override. This starts
+   a fresh board on the new branch **and commits a pointer to the parent's
+   board.yml** so other contributors' stale checkouts auto-resolve to the
+   new iteration. That pointer commit pushes to the parent — on a
+   push-protected parent it will warn, and contributors then need a
+   one-time `TASKS init --integration <branch>`. The new index defaults to
+   one more than the max of the live index and every archived index;
+   `--iteration N` sets it explicitly and is refused if that number
+   already has an archive.
 2. Remind the user: `git checkout <branch>`.
 3. Later tasks are reseeded by the script (fresh ids, still later, a
-   `carried from <old-iteration>/T<n>` note) — do not walk them. Re-add any
-   other carried-over (unfinished-then-forced) tasks the same way, reading
-   them from `.tasks/archive/<old-iteration>/NNN.md`.
+   `carried from <n>/T<id>` note) — do not walk them. Re-add any other
+   carried-over (unfinished-then-forced) tasks the same way, reading
+   them from `.tasks/archive/<n>-<slug>/NNN.md`.

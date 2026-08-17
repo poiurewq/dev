@@ -48,10 +48,14 @@ VIEWER_NAME = "board"
 # changes in a way future scripts must detect. Missing schema_version on disk
 # means 0 (pre-stamp boards). Never downgrade a higher version on write.
 # 2: later is a valid task status (additive; older readers ignore unknown).
-SCHEMA_VERSION = 2
+# 3: iteration is a positive integer identity; iteration_name and
+#    iteration_started added. Pre-3 dated names fail closed (no migrate).
+SCHEMA_VERSION = 3
 CONFIG_KEYS = ["schema_version", "integration_branch", "parent_branch",
-               "iteration", "integrator", "contributors"]
-SETTABLE_KEYS = ["parent_branch", "integrator", "iteration"]
+               "iteration", "iteration_name", "iteration_started",
+               "integrator", "contributors"]
+SETTABLE_KEYS = ["parent_branch", "integrator", "iteration",
+                 "iteration_name", "iteration_started"]
 # kind: optional. "" = normal task; "umbrella" = goal parent whose deps are
 # direct children (leaves or nested umbrellas). Hierarchy lives in deps;
 # reverse index is computed at board time. Other kind values reserved for
@@ -544,6 +548,8 @@ def read_board_cfg(bw, scope):
         print(f"warning: board schema_version {v} is newer than this tasks.py "
               f"(supports {SCHEMA_VERSION}); unknown fields may be ignored",
               file=sys.stderr)
+    # Schema 3: identity is a positive integer. No migrate-on-read.
+    iteration_index(cfg)
     return cfg
 
 
@@ -860,40 +866,94 @@ def slugify(title):
     return s[:40].rstrip("-") or "task"
 
 
-ISO_DATE_PREFIX = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:\b|_)")
+def parse_positive_int(value, what="value"):
+    raw = str(value if value is not None else "").strip()
+    if not raw.isdigit() or int(raw) < 1:
+        sys.exit(f"error: {what} must be a positive integer (got {value!r})")
+    return int(raw)
 
 
-def normalize_iteration_name(name, today=None):
-    """Iteration names carry their start date: <YYYY-MM-DD>-<name>.
+def parse_iso_date(value, what="date"):
+    raw = (value or "").strip()
+    try:
+        datetime.date.fromisoformat(raw)
+    except ValueError:
+        sys.exit(f"error: {what} must be YYYY-MM-DD (got {value!r})")
+    return raw
 
-    Archive dirs and log.md sections are otherwise an unordered set of slugs,
-    so the order a project was built in is unreconstructable. Idempotent: a
-    name that already starts with an ISO date is left alone, so re-running
-    init on an existing board never double-prefixes. ``today`` is the date
-    to attach when the name is undated — callers pass the current start
-    date on rename, or omit it to stamp today (creation / undated current).
-    """
+
+def iteration_index(cfg):
+    """Live iteration identity. Fail closed if board.yml is pre-schema-3."""
+    return parse_positive_int(cfg.get("iteration"), "board.yml iteration")
+
+
+def iteration_name(cfg):
+    return (cfg.get("iteration_name") or "").strip()
+
+
+def iteration_started(cfg):
+    return (cfg.get("iteration_started") or "").strip()
+
+
+def iteration_label(cfg):
+    """Human-facing '1' or '1 — MVP'."""
+    idx = iteration_index(cfg)
+    name = iteration_name(cfg)
+    return f"{idx} — {name}" if name else str(idx)
+
+
+def title_prefix(idx, tid):
+    return f"[{int(idx)}/T{int(tid)}]"
+
+
+# Schema-3 dirs are `{n}` or `{n}-{slug}`. Pre-3 leftovers are
+# `YYYY-MM-DD` or `YYYY-MM-DD-slug` — those must not parse as year N.
+ARCHIVE_INDEX_RE = re.compile(r"^(\d+)(?:-.*)?$")
+PRE3_ARCHIVE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(?:-.*)?$")
+
+
+def archive_dir_index(ent):
+    """Integer index from a schema-3 archive dir name, or None."""
+    if PRE3_ARCHIVE_RE.match(ent):
+        return None
+    m = ARCHIVE_INDEX_RE.match(ent)
+    return int(m.group(1)) if m else None
+
+
+def iteration_archive_slug(index, name=""):
+    """Directory name: '{n}-{slug}' or '{n}' when unnamed."""
     name = (name or "").strip()
-    today = today or datetime.date.today().isoformat()
-    if not name:
-        return today
-    if ISO_DATE_PREFIX.match(name):
-        return name
-    return f"{today}-{name}"
+    slug = slugify(name) if name else ""
+    return f"{int(index)}-{slug}" if slug else str(int(index))
 
 
-def iteration_slug(name):
-    """Directory-safe form of an iteration name, keeping any date prefix.
+def require_schema3_archive_slug(index, name="", what="iteration"):
+    """Fail closed if {n}-{slug} would look like a pre-3 date dir.
 
-    slugify truncates at 40 chars; applying it to the whole dated name would
-    spend 11 of those on the date and make long names collide on their
-    prefix. Slug the remainder, then re-attach the date.
+    Those names are invisible to archive_dir_index, so a year-like index
+    plus an MM-DD display name would skip clash detection and overwrite.
     """
-    m = ISO_DATE_PREFIX.match(name or "")
-    if not m:
-        return slugify(name)
-    rest = name[m.end():].strip("-_ ")
-    return f"{m.group(1)}-{slugify(rest)}" if rest else m.group(1)
+    slug = iteration_archive_slug(index, name)
+    if PRE3_ARCHIVE_RE.match(slug):
+        shown = (name or "").strip() or "(none)"
+        sys.exit(f"error: {what} {int(index)} name {shown!r} would archive "
+                 f"as {slug!r}, which looks like a pre-schema-3 date dir "
+                 "and would be invisible to the index scan. Pick a "
+                 "different number or display name.")
+    return slug
+
+
+def iteration_close_heading(index, name=""):
+    name = (name or "").strip()
+    return f"## {int(index)} — {name}" if name else f"## {int(index)}"
+
+
+def log_has_close_section(text, index):
+    """True if log.md has a close heading for this index ('## N' or '## N — …').
+
+    Must not treat '## 1' as a match for 10.
+    """
+    return re.search(rf"(?m)^## {int(index)}(?: — |$)", text) is not None
 
 
 def default_task_branch(scope, tid, title):
@@ -2126,6 +2186,9 @@ def cmd_claim(args):
                  f"or land/cleanup first")
     if (meta.get("needs") or "").strip() == "decision":
         sys.exit(f"error: T{tid} has needs: decision; resolve before claim")
+    if not split_areas(meta.get("area", "")):
+        sys.exit(f"error: T{tid} has no area; set a real name "
+                 f"(reuse or area set) before claim")
 
     assignee = (args.assignee if args.assignee is not None else "").strip()
     if not assignee:
@@ -2759,8 +2822,11 @@ def cmd_ship(args):
     Version intent is agent-owned (optional --version-intent / --body only).
     """
     root, scope, integration, bw = ctx()
+    cfg = read_board_cfg(bw, scope)
+    idx = iteration_index(cfg)
     meta = find_task(bw, scope, args.id)
     tid = meta["id"]
+    prefix = title_prefix(idx, tid)
     branch = task_branch_name(meta)
     if not branch:
         sys.exit(f"error: T{tid} has no branch; run claim first")
@@ -2786,8 +2852,7 @@ def cmd_ship(args):
     print(f"T{tid}: ship from {work} (branch {branch})")
 
     if worktree_is_dirty(work):
-        msg = (args.message or "").strip() or f"[T{tid}] {meta['title']}"
-        prefix = f"[T{tid}]"
+        msg = (args.message or "").strip() or f"{prefix} {meta['title']}"
         if not msg.startswith(prefix):
             msg = f"{prefix} {msg}"
         r = git("add", "-A", cwd=work, check=False)
@@ -2849,9 +2914,9 @@ def cmd_ship(args):
     push_task_branch(root, branch, force=False)
 
     if not pr_url:
-        title = (args.title or "").strip() or f"[T{tid}] {meta['title']}"
-        if not title.startswith(f"[T{tid}]"):
-            title = f"[T{tid}] {title}"
+        title = (args.title or "").strip() or f"{prefix} {meta['title']}"
+        if not title.startswith(prefix):
+            title = f"{prefix} {title}"
         body = (args.body or "").strip()
         if not body:
             body = (meta.get("body") or "").strip() or meta["title"]
@@ -3100,11 +3165,12 @@ def cmd_preflight(args):
     )
 
 
-def iteration_close_ready(bw, scope, iteration_name):
+def iteration_close_ready(bw, scope, index):
     """Return an error string if the board is not closed for land, else None.
 
     Ready means: no live task files, and log.md has a close heading for this
-    iteration (written by iteration-close as ``## {name} — closed …``).
+    iteration index (written by iteration-close as ``## {n}`` or
+    ``## {n} — {name}``).
     """
     tasks = all_tasks(bw, scope)
     if tasks:
@@ -3114,17 +3180,19 @@ def iteration_close_ready(bw, scope, iteration_name):
     log_path = os.path.join(bw, tdir(scope), "log.md")
     rel = f"{tdir(scope)}/log.md"
     if not os.path.isfile(log_path):
-        return (f"no {rel} close entry for iteration {iteration_name!r}; "
+        return (f"no {rel} close entry for iteration {index}; "
                 f"run TASKS iteration-close first")
-    # Match the heading iteration-close writes; any such section for this
-    # name counts (re-close of the same name is not expected on one branch).
-    needle = f"## {iteration_name} — closed "
     with open(log_path) as f:
         text = f.read()
-    if needle not in text:
-        return (f"no log close section for iteration {iteration_name!r} in "
+    if not log_has_close_section(text, index):
+        return (f"no log close section for iteration {index} in "
                 f"{rel}; run TASKS iteration-close first")
     return None
+
+
+def live_iteration_closed(bw, scope, cfg):
+    """True when the live iteration is closed in log.md and the board is empty."""
+    return iteration_close_ready(bw, scope, iteration_index(cfg)) is None
 
 
 def cmd_iteration_land(args):
@@ -3144,8 +3212,8 @@ def cmd_iteration_land(args):
     if parent == integration:
         sys.exit(f"error: parent_branch equals integration_branch "
                  f"('{integration}')")
-    name = cfg.get("iteration") or integration
-    not_ready = iteration_close_ready(bw, scope, name)
+    idx = iteration_index(cfg)
+    not_ready = iteration_close_ready(bw, scope, idx)
     if not_ready:
         sys.exit(f"error: {not_ready}")
     require_gh(root)
@@ -3191,9 +3259,10 @@ def cmd_iteration_land(args):
 
     pr_url = open_url
     if not pr_url:
-        title = (args.title or "").strip() or f"iteration {name}"
+        label = iteration_label(cfg)
+        title = (args.title or "").strip() or f"iteration {label}"
         body = (args.body or "").strip() or (
-            f"Land iteration '{name}' (`{integration}` → `{parent}`) "
+            f"Land iteration {label} (`{integration}` → `{parent}`) "
             f"with a merge commit (not squash).\n")
         r = gh("pr", "create", "--base", parent, "--head", integration,
                "--title", title, "--body", body, cwd=root, check=False)
@@ -3282,9 +3351,18 @@ def cmd_init(args):
     branch, bw = resolve_board(root, scope)
     if not os.path.exists(board_yml_path(bw, scope)):
         os.makedirs(os.path.join(bw, tdir(scope)), exist_ok=True)
+        idx = parse_positive_int(
+            args.iteration if args.iteration is not None else 1, "iteration")
+        started = parse_iso_date(
+            args.iteration_started or datetime.date.today().isoformat(),
+            "iteration_started")
+        iname = (args.iteration_name or "").strip()
+        require_schema3_archive_slug(idx, iname)
         cfg = {"schema_version": str(SCHEMA_VERSION),
                "integration_branch": branch, "parent_branch": args.parent or "",
-               "iteration": normalize_iteration_name(args.iteration or branch),
+               "iteration": str(idx),
+               "iteration_name": iname,
+               "iteration_started": started,
                "integrator": args.name, "contributors": args.name}
         write_board_cfg(bw, scope, cfg)
         gi = os.path.join(bw, ".gitignore")
@@ -3347,32 +3425,37 @@ def cmd_config(args):
             sys.exit(f"error: '{args.key}' is not settable via config "
                      f"(settable: {', '.join(SETTABLE_KEYS)})")
         value = args.value
+        if args.key in ("iteration", "iteration_name", "iteration_started"):
+            # Land gate matches log.md's "## {n}" heading. Changing identity,
+            # display name, or start after close would desync the heading
+            # (and, for a renumber, the archive path already written).
+            if live_iteration_closed(bw, scope, cfg):
+                cur = iteration_index(cfg)
+                sys.exit(f"error: iteration {cur} is already closed in "
+                         f"{tdir(scope)}/log.md; changing {args.key} now "
+                         "would break iteration-land. Land it, then start "
+                         "the next one with iteration-new.")
         if args.key == "iteration":
-            # "" clears a field on update, so it is a plausible typo here; an
-            # empty iteration would archive to a "task" slug and write a
-            # headless log heading.
-            if not value.strip():
-                sys.exit("error: iteration name cannot be empty")
-            cur = cfg.get("iteration", branch)
-            # iteration_close_ready matches log.md's "## <name> — closed …"
-            # heading, so renaming a closed-but-unlanded iteration would break
-            # the land gate. Refuse exactly then — while tasks are still live
-            # (including the close-time collision case) renaming is safe.
-            if iteration_close_ready(bw, scope, cur) is None:
-                sys.exit(f"error: iteration {cur!r} is already closed in "
-                         f"{tdir(scope)}/log.md; renaming it now would break "
-                         "iteration-land. Land it, then start the next one "
-                         "with iteration-new.")
-            # Same normalizer as init / iteration-new. Rename keeps the
-            # current start date; today is only for creation, or when the
-            # current name is undated.
-            kept = ISO_DATE_PREFIX.match(cur or "")
-            value = normalize_iteration_name(
-                value, today=kept.group(1) if kept else None)
-            taken = archive_taken(bw, scope, value)
+            new = parse_positive_int(value, "iteration")
+            cur = iteration_index(cfg)
+            name = iteration_name(cfg)
+            require_schema3_archive_slug(new, name)
+            if new != cur:
+                taken = archive_taken(bw, scope, new, name)
+                if taken:
+                    sys.exit(f"error: iteration {new} already has an archive "
+                             f"at {taken}/; pick another number.")
+            value = str(new)
+        elif args.key == "iteration_name":
+            value = value.strip()
+            idx = iteration_index(cfg)
+            require_schema3_archive_slug(idx, value)
+            taken = archive_taken(bw, scope, idx, value)
             if taken:
-                sys.exit(f"error: iteration name {value!r} already has an "
-                         f"archive at {taken}/; pick another name.")
+                sys.exit(f"error: iteration {idx} already has an archive "
+                         f"at {taken}/; pick another name.")
+        elif args.key == "iteration_started":
+            value = parse_iso_date(value, "iteration_started")
         cfg[args.key] = value
         write_board_cfg(bw, scope, cfg)
         board_commit(root, branch, bw, scope, f"dev: config {args.key}={value}")
@@ -3709,7 +3792,7 @@ def _render_board(args):
     expand = bool(getattr(args, "expand", False))
     by_area = bool(getattr(args, "by_area", False))
     covered = set() if expand else covered_by_umbrellas(tasks)
-    title = f"# Board — iteration {cfg.get('iteration', '')}"
+    title = f"# Board — iteration {iteration_label(cfg)}"
     if scope != ".":
         title += f" ({scope})"
     if by_area:
@@ -3900,55 +3983,110 @@ def cmd_iteration(args):
     in_play = [t for t in tasks if t["status"] != "later"]
     done = sum(1 for t in in_play if t["status"] == "done")
     print(f"scope: {scope}")
-    print(f"iteration: {cfg.get('iteration', '')}")
+    print(f"iteration: {iteration_index(cfg)}")
+    print(f"iteration_name: {iteration_name(cfg) or '(none)'}")
+    print(f"iteration_started: {iteration_started(cfg) or '(none)'}")
     print(f"integration_branch: {cfg.get('integration_branch', '')}")
     print(f"parent_branch: {cfg.get('parent_branch', '') or '(none)'}")
     print(f"tasks: {done}/{len(in_play)} done")
 
 
-def archive_dir(scope, iteration_name):
+def archive_dir(scope, index, name=""):
     """Where a closed iteration's task files are kept, relative to repo root.
 
     A subdirectory of the board dir, so it lands with the board and survives
     into later iterations; task_glob only matches NNN.md at the board root,
-    so archived files are never live tasks.
+    so archived files are never live tasks. Path is archive/{n}-{slug} or
+    archive/{n} when unnamed.
     """
-    return os.path.join(tdir(scope), "archive", iteration_slug(iteration_name))
+    return os.path.join(tdir(scope), "archive",
+                        iteration_archive_slug(index, name))
 
 
-def archive_taken(bw, scope, iteration_name):
-    """Relative archive dir if it already holds a closed iteration, else None.
+def find_archive_rel(bw, scope, index):
+    """Relative archive dir for this index if it exists non-empty, else None.
+
+    Clash is on the integer, not the display-name slug: 3-mvp and 3 are
+    the same iteration.
+    """
+    root = os.path.join(bw, tdir(scope), "archive")
+    if not os.path.isdir(root):
+        return None
+    want = int(index)
+    for ent in sorted(os.listdir(root)):
+        if archive_dir_index(ent) != want:
+            continue
+        d = os.path.join(root, ent)
+        if os.path.isdir(d) and os.listdir(d):
+            return os.path.join(tdir(scope), "archive", ent)
+    return None
+
+
+def archive_taken(bw, scope, index, name=None):
+    """Relative archive dir if this index already holds a closed iteration.
 
     Ids restart each iteration, so archiving onto an existing directory would
-    overwrite another iteration's tasks. Checked at naming time (iteration-new,
-    config iteration), where picking another name is free, and again at close
-    as a last resort.
+    overwrite another iteration's tasks. Checked at numbering time
+    (iteration-new, config iteration) and again at close as a last resort.
+    The integer scan ignores pre-3 YYYY-MM-DD dirs; when name is given,
+    also refuse a non-empty dest at the computed {n}-{slug} path.
     """
-    rel = archive_dir(scope, iteration_name)
+    taken = find_archive_rel(bw, scope, index)
+    if taken:
+        return taken
+    if name is None:
+        return None
+    rel = archive_dir(scope, index, name)
     d = os.path.join(bw, rel)
-    return rel if os.path.isdir(d) and os.listdir(d) else None
+    if os.path.isdir(d) and os.listdir(d):
+        return rel
+    return None
 
 
-def archived_tasks(bw, scope, iteration_name):
+def archived_indexes(bw, scope):
+    """Set of iteration indexes that already have a non-empty archive dir."""
+    root = os.path.join(bw, tdir(scope), "archive")
+    if not os.path.isdir(root):
+        return set()
+    found = set()
+    for ent in os.listdir(root):
+        idx = archive_dir_index(ent)
+        if idx is None:
+            continue
+        d = os.path.join(root, ent)
+        if os.path.isdir(d) and os.listdir(d):
+            found.add(idx)
+    return found
+
+
+def next_iteration_index(bw, scope, current):
+    taken = archived_indexes(bw, scope)
+    taken.add(int(current))
+    return max(taken) + 1
+
+
+def archived_tasks(bw, scope, index):
     """Parse task files from a closed iteration's archive dir (empty if none)."""
-    d = os.path.join(bw, archive_dir(scope, iteration_name))
-    if not os.path.isdir(d):
+    rel = find_archive_rel(bw, scope, index)
+    if not rel:
         return []
+    d = os.path.join(bw, rel)
     paths = sorted(glob.glob(os.path.join(d, "[0-9][0-9][0-9].md")))
     return [parse_task(p) for p in paths]
 
 
-def reseed_later_tasks(bw, scope, old_iteration):
+def reseed_later_tasks(bw, scope, old_index):
     """Copy archived later tasks onto the live board with fresh ids.
 
-    Only the named iteration's archive (the one just closed). Scanning every
-    archive would duplicate a task that stayed later across closes.
+    Only the outgoing iteration's archive (the one just closed). Scanning
+    every archive would duplicate a task that stayed later across closes.
     later→later deps are remapped; deps on anything else are dropped.
     Returns [(new_meta, old_id), ...] in new-id order.
     """
-    if not (old_iteration or "").strip():
+    if old_index is None:
         return []
-    laters = [t for t in archived_tasks(bw, scope, old_iteration)
+    old_index = int(old_index)
+    laters = [t for t in archived_tasks(bw, scope, old_index)
               if t.get("status") == "later"]
     if not laters:
         return []
@@ -3963,7 +4101,7 @@ def reseed_later_tasks(bw, scope, old_iteration):
         new_id = mapping[t["id"]]
         new_deps = [mapping[d] for d in t.get("deps", []) if d in mapping]
         body = append_body(t.get("body") or "",
-                           f"carried from {old_iteration}/T{t['id']}")
+                           f"carried from {old_index}/T{t['id']}")
         meta = {
             "id": new_id,
             "title": t.get("title") or "",
@@ -3987,7 +4125,7 @@ def reseed_later_tasks(bw, scope, old_iteration):
 
 
 def cmd_iteration_close(args):
-    """Archive task files under .tasks/archive/<iteration>/, index them in
+    """Archive task files under .tasks/archive/{n}-{slug}/, index them in
     .tasks/log.md, and remove the live files, committing on the integration
     branch. Landing the integration branch in the parent (via PR) happens
     afterwards and is not this script's job."""
@@ -4002,24 +4140,33 @@ def cmd_iteration_close(args):
         sys.exit(f"error: unfinished tasks: {ids}. Finish them, mark later, "
                  "delete them, or re-run with --force to close anyway (they "
                  "will be logged as unfinished and removed).")
-    name = cfg.get("iteration", branch)
+    idx = iteration_index(cfg)
+    name = iteration_name(cfg)
+    started = iteration_started(cfg)
     today = datetime.date.today().isoformat()
     parent = cfg.get("parent_branch", "")
-    arel = archive_dir(scope, name)
+    require_schema3_archive_slug(idx, name)
+    arel = archive_dir(scope, idx, name)
     adir = os.path.join(bw, arel)
-    # Normally caught at naming time; reachable only if the archive appeared
-    # after this iteration was named (a merge from the parent, say). Fail
-    # closed — the whole point of the archive is that nothing is lost.
-    if archive_taken(bw, scope, name):
-        sys.exit(f"error: iteration name {name!r} already has an archive at "
-                 f"{arel}/; closing would overwrite it. Rename this iteration "
-                 f"first: TASKS config iteration <new-name>")
+    # Normally caught at numbering time; reachable only if the archive
+    # appeared after this iteration was numbered (a merge from the parent,
+    # say). Fail closed — the whole point of the archive is that nothing
+    # is lost.
+    taken = archive_taken(bw, scope, idx, name)
+    if taken:
+        sys.exit(f"error: iteration {idx} already has an archive at "
+                 f"{taken}/; closing would overwrite it. Renumber first: "
+                 f"TASKS config iteration <n>")
     os.makedirs(adir, exist_ok=True)
-    header = f"## {name} — closed {today} (branch {branch}"
-    header += f" → {parent})" if parent else ")"
-    entry = [header, f"archive: {arel}/"]
+    entry = [iteration_close_heading(idx, name)]
+    if started:
+        entry.append(f"started: {started}")
+    entry.append(f"closed: {today}")
+    extra = f" → {parent}" if parent else ""
+    entry.append(f"branch: {branch}{extra}")
+    entry.append(f"archive: {arel}/")
     for t in tasks:
-        line = f"- {name}/T{t['id']} {t['title']}"
+        line = f"- {idx}/T{t['id']} {t['title']}"
         if t.get("assignee"):
             line += f" — {t['assignee']}"
         if t.get("area"):
@@ -4048,8 +4195,8 @@ def cmd_iteration_close(args):
         shutil.copyfile(t["path"],
                         os.path.join(adir, os.path.basename(t["path"])))
         os.remove(t["path"])
-    board_commit(root, branch, bw, scope, f"dev: close iteration {name}")
-    print(f"iteration '{name}' closed: {len(tasks)} tasks archived to "
+    board_commit(root, branch, bw, scope, f"dev: close iteration {idx}")
+    print(f"iteration {idx} closed: {len(tasks)} tasks archived to "
           f"{arel}/ and indexed in {tdir(scope)}/log.md")
     if parent:
         print(f"next: TASKS iteration-land  # merge-commit PR into '{parent}'")
@@ -4059,7 +4206,7 @@ def cmd_iteration_close(args):
 def cmd_iteration_new(args):
     root, scope, old_branch, bw = ctx()
     cfg = read_board_cfg(bw, scope)
-    old_iteration = cfg.get("iteration") or ""
+    old_idx = iteration_index(cfg)
     parent = args.parent or cfg.get("parent_branch", "")
     if not parent:
         sys.exit("error: no parent branch known; pass --parent <branch>")
@@ -4094,33 +4241,44 @@ def cmd_iteration_new(args):
     os.makedirs(os.path.join(bw, tdir(scope)), exist_ok=True)
     cfg["integration_branch"] = args.branch
     cfg["parent_branch"] = parent
-    name = normalize_iteration_name(args.name or args.branch)
+    if args.iteration is not None:
+        new_idx = parse_positive_int(args.iteration, "iteration")
+    else:
+        new_idx = next_iteration_index(bw, scope, old_idx)
+    new_name = (args.name or "").strip()
+    require_schema3_archive_slug(new_idx, new_name)
     # The gate above makes the parent carry every closed iteration's archive,
-    # so this is the moment a collision is both visible and free to fix — pick
-    # another name rather than discovering it at close, with a board full of
-    # tasks.
-    taken = archive_taken(bw, scope, name)
+    # so this is the moment a collision is both visible and free to fix —
+    # pick another number rather than discovering it at close, with a board
+    # full of tasks.
+    taken = archive_taken(bw, scope, new_idx, new_name)
     if taken:
-        sys.exit(f"error: iteration name {name!r} already has an archive at "
-                 f"{taken}/; closing it later would overwrite that iteration. "
-                 "Pick another name: iteration-new <branch> --name <name>")
-    cfg["iteration"] = name
+        sys.exit(f"error: iteration {new_idx} already has an archive at "
+                 f"{taken}/; closing it later would overwrite that "
+                 "iteration. Pick another number: iteration-new <branch> "
+                 "--iteration <n>")
+    started = parse_iso_date(
+        args.iteration_started or datetime.date.today().isoformat(),
+        "iteration_started")
+    cfg["iteration"] = str(new_idx)
+    cfg["iteration_name"] = new_name
+    cfg["iteration_started"] = started
     write_board_cfg(bw, scope, cfg)
     write_cache(root, scope, args.branch)
-    reseeded = reseed_later_tasks(bw, scope, old_iteration)
+    reseeded = reseed_later_tasks(bw, scope, old_idx)
     board_commit(root, args.branch, bw, scope,
-                 f"dev: start iteration {cfg['iteration']}")
+                 f"dev: start iteration {new_idx}")
     # leave a pointer on the parent so other contributors' stale checkouts
     # resolve to the new iteration (resolve_board follows it)
     git("reset", "--hard", start, cwd=bw)
     os.makedirs(os.path.join(bw, tdir(scope)), exist_ok=True)
     write_board_cfg(bw, scope, cfg)
     board_commit(root, parent, bw, scope,
-                 f"dev: point board at iteration {cfg['iteration']}")
-    print(f"iteration '{cfg['iteration']}' started on new branch "
+                 f"dev: point board at iteration {new_idx}")
+    print(f"iteration {new_idx} started on new branch "
           f"'{args.branch}' (parent: {parent})")
     if reseeded:
-        bits = ", ".join(f"T{m['id']} ← {old_iteration}/T{oid}"
+        bits = ", ".join(f"T{m['id']} ← {old_idx}/T{oid}"
                          for m, oid in reseeded)
         print(f"reseeded {len(reseeded)} later task(s): {bits}")
     print(f"note: switch your checkout when ready: git checkout {args.branch}")
@@ -4140,8 +4298,11 @@ def main():
     s.add_argument("--integration", help="integration branch (default: existing board's, else current)")
     s.add_argument("--parent", help="parent branch this integration branch lands in")
     s.add_argument("--iteration",
-                   help="iteration name (default: branch name); stored with a "
-                        "<YYYY-MM-DD>- start-date prefix unless it has one")
+                   help="iteration number (default: 1)")
+    s.add_argument("--iteration-name",
+                   help="optional display name")
+    s.add_argument("--iteration-started",
+                   help="start date YYYY-MM-DD (default: today)")
     s.set_defaults(fn=cmd_init)
 
     s = sub.add_parser("whoami", help="print this checkout's identity")
@@ -4237,13 +4398,17 @@ def main():
     s.add_argument("branch")
     s.add_argument("--parent")
     s.add_argument("--name",
-                   help="iteration name (default: branch name); stored with a "
-                        "<YYYY-MM-DD>- start-date prefix unless it has one")
+                   help="optional display name (not the identity)")
+    s.add_argument("--iteration",
+                   help="iteration number (default: one more than max of "
+                        "live and archived indexes)")
+    s.add_argument("--iteration-started",
+                   help="start date YYYY-MM-DD (default: today)")
     s.set_defaults(fn=cmd_iteration_new)
 
     s = sub.add_parser("iteration-land",
                        help="open/merge iteration PR into parent (merge commit, not squash)")
-    s.add_argument("--title", help="PR title (default: iteration <name>)")
+    s.add_argument("--title", help="PR title (default: iteration <n>)")
     s.add_argument("--body", help="PR body")
     s.add_argument("--create-only", action="store_true",
                    help="open the PR but do not merge")
@@ -4264,12 +4429,14 @@ def main():
     s.set_defaults(fn=cmd_diff)
 
     s = sub.add_parser("ship",
-                       help="implement ship: commit [T<id>], push, open PR, status=review")
+                       help="implement ship: commit [n/T<id>], push, open PR, status=review")
     s.add_argument("id", type=int)
     s.add_argument("--message", "-m",
-                   help="commit message if worktree dirty (default: [T<id>] <title>)")
+                   help="commit message if worktree dirty "
+                        "(default: [n/T<id>] <title>)")
     s.add_argument("--title",
-                   help="PR title on create only (default: [T<id>] <task title>)")
+                   help="PR title on create only "
+                        "(default: [n/T<id>] <task title>)")
     s.add_argument("--body",
                    help="PR body on create only (default: task body)")
     s.add_argument("--version-intent",

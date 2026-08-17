@@ -33,11 +33,18 @@ or reset the local integration branch — that is human-only
    surface the output (any assignee's `doing` or `review`, including this
    auto identity's other work). Never pass several candidates as one
    collisions set — that would treat them as batch peers. Never select an
-   `all` task (those wait for a human-supervised quiet board). **Area sanity**: if the recorded area is
-   clearly wrong for what the code now requires, fix it and note why in one
-   call (`TASKS update <id> --area "<better>" --append "<why>"`); if the
-   right area is genuinely debatable, treat it as a design fork (flag
-   `needs: decision`, move on). Then triage for **fork risk**: read the task
+   `all` task (those wait for a human-supervised quiet board). Untagged
+   candidates: do not claim and do not invent a placeholder. Recommend a
+   reuse from `TASKS area list` or a new name to `area set`, write the
+   fork (options + recommendation) into the body, and flag `needs:
+   decision` — do not `area set` or `--area` until a human decides via
+   review. File that fork for each otherwise-eligible untagged
+   candidate, then continue select among tagged ones. **Area sanity**: a
+   mis-tag (replace with same-width or narrower) — fix it and note why
+   (`TASKS update <id> --area "<better>" --append "<why>"`). Adding
+   coverage is the leaving-areas fork: do not `--area` or `area set`;
+   write the file(s) and recommended area(s) into the body, flag
+   `needs: decision`, move on. Then triage for **fork risk**: read the task
    body and skim the code it touches; prefer tasks that are mechanical or
    fully pinned down (clear scope, `Decision:` lines already present,
    established patterns). If nothing suitable exists, report that and stop —
@@ -60,8 +67,14 @@ or reset the local integration branch — that is human-only
    flag and un-claim: `TASKS update <id> --needs decision --status backlog
    --assignee "" --branch "" --append "<the fork write-up>"`, discard the
    branch, and return to step 2. Only flag *genuine* forks — choices repo
-   conventions already settle don't count. (Local-ahead was already cleared
-   or soft-noted in step 1 — do not re-triage park/discard here.)
+   conventions already settle don't count. Leaving the stated areas
+   (flows/implement.md) is a fork: do not `--area` or `area set`. Write
+   the file(s) and recommended area(s) into the body, then flag and
+   un-claim as above. A `Decision:` already on the body for this
+   widen is prior approval — retry apply+collisions; do not file
+   a second fork.
+   (Local-ahead was already cleared or soft-noted in step 1 — do
+   not re-triage park/discard here.)
 6. **Ship** via `TASKS ship <id> --shipped "<what actually shipped>"` (ends at
    `--status review --pr <url>`). The shipped record is required — result,
    not plan; see flows/implement.md step 6.

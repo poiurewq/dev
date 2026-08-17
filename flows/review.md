@@ -90,7 +90,8 @@ re-run with the full required set. Exit 0 → continue below.
    for, then present the fork as a one-question decision.
 2. On the user's call, record it and return the task to the pool:
    `TASKS update <id> --needs "" --status backlog --append "Decision: <choice
-   + one-line why>"`.
+   + one-line why>"`. If the fork assigned an area, include `--area` on
+   that update (`area set` first if the name is new).
 3. If the resolution is "don't do this at all", that's a not-planned outcome
    instead: `TASKS update <id> --needs "" --status not-planned --reason
    "<the user's why>"`.

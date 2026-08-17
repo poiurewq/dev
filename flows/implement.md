@@ -47,10 +47,16 @@ single id. `/dev auto` stays one task per cycle.
    it.
 
    Then three pre-claim checks, **always**:
-   - **Area sanity**: does the recorded area still fit what this task will
-     actually touch? (The codebase may have shifted since declaration.) If
-     not, surface it; on the user's approval, `TASKS update <id> --area
-     "<better>"` before proceeding.
+   - **Area sanity**: empty area is a hard stop — do not claim, and do
+     not run collisions yet (`claim` refuses; untagged tasks skip
+     collisions). From `TASKS area list`, recommend a reuse and/or a
+     new name (`area set`); no placeholder. Wait for the user. On
+     their call, `area set` if new, then `TASKS update <id> --area
+     "..."` and `Decision:`. Only then continue to collisions. If
+     they decline to name it, stop. If the recorded area is set but
+     no longer fits what this task will actually touch (the codebase
+     may have shifted since declaration), surface it; on the user's
+     approval, update `--area` before collisions.
    - **Area collision**: `TASKS collisions <id>` (SKILL.md *Area
      stewardship*). Exit 2 → print the output and **stop** — do not claim.
      Any assignee's `doing` or `review` in an overlapping area counts,
@@ -141,6 +147,25 @@ single id. `/dev auto` stays one task per cycle.
    that isn't obvious from the code, add a one-line invariant to the
    nearest `AGENTS.md` (SKILL.md *Vendor-neutral*).
 
+   **Leaving the stated areas**: Before touching a file the task's
+   area(s) do not cover (`TASKS area list` descriptions + SKILL.md
+   *Area stewardship* path convention), pause. Name the file(s) and
+   the area they belong to. Do not write those files yet. A
+   `Decision:` already on the body for this widen is prior approval
+   — say you are retrying it; do not re-ask. Otherwise ask (auto:
+   leaving-areas fork, flows/auto.md). Decline → stay inside; no
+   Decision. On approval: `area set` if the name is new, then
+   `TASKS update <id> --area "…"` (add the specific child, not the
+   parent) and `Decision:` (files + areas) if this is the first
+   approval, then `TASKS collisions <id>` (batch: the whole set).
+   Exit 0 → touch those files. Exit 2 → revert `--area` to the
+   previous set, keep the `Decision:` (`widen to X for <files>;
+   last blocked by T…`), stop — do not touch those files, do not
+   set `needs: decision`. In-area work may continue. Next
+   implement retries that Decision (still blocked → revert if you
+   updated, leave the Decision, stop). Widening to `all` still
+   needs the quiet-board vouch.
+
    **Mid-flight scope changes** (high bar for re-triage). If the user expands
    the ask while you are implementing:
    - **In-place (default):** still one focused unit — clarifications,
@@ -159,7 +184,10 @@ single id. `/dev auto` stays one task per cycle.
    diff. Never ambient `git diff` / `git status`; an empty hub tree is
    not a clean self-review. Re-read that output with fresh eyes: crash
    risks, unintended file touches, scope creep, leftover debug code,
-   convention drift. Fix what you find. If a deeper review tool exists
+   convention drift. If the diff left the stated areas, route
+   through **Leaving the stated areas** above (files already
+   written: same path; decline or collisions exit 2 → revert those
+   files and `--area` if updated). Fix what you find. If a deeper review tool exists
    in this environment, use it.
 
 6. **Ship**: `TASKS ship <id> --shipped "<what actually shipped>"` from the
