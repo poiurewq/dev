@@ -29,7 +29,7 @@ pad toward a full menu.
 
 | When | Offer |
 |---|---|
-| Open forks (`needs: decision`), `proposed` tasks, or open PRs you may merge | `/dev review` |
+| Open forks (`needs: decision`), `proposed` tasks, or open PRs to review | `/dev review` |
 | Your `doing` / `planned` / `review` work | `/dev status` · `/dev implement <id>` (or resume note for `review`) |
 | Unassigned backlog and a quiet plate | 1–2 unblocked candidates via `/dev pick <id>` or `/dev implement <id>` |
 | No open work on the board | `/dev add <task-or-goal>` |

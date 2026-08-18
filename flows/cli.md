@@ -102,7 +102,8 @@ TASKS restack --ids <id,id,…> [--after N] [--onto <ref>]
 TASKS preflight [--park|--discard]      # local integration ahead of origin
                                         # (check exits 2 if in-scope ahead;
                                         # --park / --discard are interactive)
-TASKS land <id>                         # post-approval: destack children
-                                        # first, then merge, cleanup, done
+TASKS land <id>                         # integrator-only merge: destack
+                                        # children first, then merge,
+                                        # cleanup, done
 TASKS cleanup <id>                      # worktree + branch prune (branch only if PR MERGED)
 ```

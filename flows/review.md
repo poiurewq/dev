@@ -21,11 +21,10 @@ land; do not load that file for a single independent PR.
 
 After a PR state refresh (SKILL.md):
 1. **Implementation PRs**: tasks in `review` with a `pr` — each with one
-   plain sentence of purpose, then note which the current user may merge
-   (not the assignee → yes; is the assignee → only if the comparison
-   above holds). State that reason. Mention integrator only when the
-   comparison holds and that exception is why they may land their own.
-   Ones already at `CHANGES_REQUESTED` are the
+   plain sentence of purpose, then whether the current user may land
+   (comparison above holds → yes; otherwise review/approve only — do
+   not `TASKS land`). Mention integrator only when the comparison
+   holds. Ones already at `CHANGES_REQUESTED` are the
    assignee's move, not a review item. When several share a `Dev-batch:`
    line (or stack bases), group them and prefer `/dev review <ids…>` over
    landing one-by-one.
@@ -36,12 +35,14 @@ After a PR state refresh (SKILL.md):
 
 Let the user pick what to handle; batch small decisions in one sitting.
 
-**Several open PRs (no Dev-batch / no stack):** pick a land order with the
-user (deps, area overlap, risk). Do **not** resolve pairwise conflicts
-against sibling task branches (`git merge-tree` between heads, etc.).
-`TASKS land <id>` one, then the next (land rebases onto the updated
-integration branch as needed) — repeat. **When a Dev-batch or stack
-applies**, `flows/review-batch.md` supersedes this path.
+**Several open PRs (no Dev-batch / no stack):** if the comparison above
+does not hold, do not land — approve if asked, then stop. Otherwise pick
+a land order with the user (deps, area overlap, risk). Do **not** resolve
+pairwise conflicts against sibling task branches (`git merge-tree`
+between heads, etc.). `TASKS land <id>` one, then the next (land rebases
+onto the updated integration branch as needed) — repeat. **When a
+Dev-batch or stack applies**, `flows/review-batch.md` supersedes this
+path.
 
 ## Single-id gate (before reviewing one implementation PR)
 
@@ -62,7 +63,9 @@ re-run with the full required set. Exit 0 → continue below.
    - **Approve & land**: conversational go-ahead in this chat is the human
      decision. If the PR author is **not** the current user, also
      `gh pr review --approve` (optional audit trail); if the author **is**
-     the current user, **skip** it — GitHub rejects self-approves. Then run
+     the current user, **skip** it — GitHub rejects self-approves. If the
+     comparison above does not hold, **stop after approve** — do not run
+     `TASKS land`; only the integrator can land. Otherwise run
      `TASKS land <id>`, which owns destack of immediate stacked children
      onto integration (before the parent is rewritten), restack of
      deeper descendants onto those rewritten parents, rebase, merge,

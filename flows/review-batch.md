@@ -65,6 +65,9 @@ Repeat until every open member is approved or the user abandons the batch.
 
 ### 2. Phase 2 — Ordered land
 
+If `whoami` is not the board integrator, do not enter this phase. Report
+approvals and say only the integrator can land.
+
 Order edges = **union of**:
 
 - within-set board `deps` (A before B when B lists A), and

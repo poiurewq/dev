@@ -2063,6 +2063,9 @@ def note_version_intent(intent, integration, product):
 def cmd_land(args):
     """Post-approval land: destack children, rebase if needed, merge, cleanup.
 
+    Merge is integrator-only (whoami == board integrator). Already-merged
+    and already-done paths are cleanup and stay allowed for anyone so
+    board/status/review refresh can mark done.
     Destacks first, while origin/<parent> is still the tip children sit on:
     retarget immediate children to integration, destack them onto
     integration (child-unique), restack deeper descendants onto the
@@ -2121,6 +2124,15 @@ def cmd_land(args):
 
     if state == "CLOSED":
         sys.exit(f"error: T{tid} PR is closed without merge: {pr}")
+
+    ident = identity_or_exit(root, scope)
+    integrator = (read_board_cfg(bw, scope).get("integrator") or "").strip()
+    if not integrator:
+        sys.exit("error: no integrator configured; cannot land. "
+                 "Set: TASKS config integrator <name>")
+    if ident != integrator:
+        sys.exit(f"error: only the board integrator can land "
+                 f"(whoami='{ident}', integrator='{integrator}')")
 
     if base and base != integration:
         sys.exit(f"error: T{tid} PR base is '{base}', board integration is "
@@ -4648,7 +4660,7 @@ def main():
     s.set_defaults(fn=cmd_preflight)
 
     s = sub.add_parser("land",
-                       help="merge task PR (squash), cleanup branches/worktree, mark done")
+                       help="integrator-only: merge task PR (squash), cleanup, mark done")
     s.add_argument("id", type=int)
     s.set_defaults(fn=cmd_land)
 

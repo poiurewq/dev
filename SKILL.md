@@ -340,7 +340,8 @@ For tasks in `review` with a `pr`, when gh is available: `gh pr view <url>
   mark done by hand.
 - `CHANGES_REQUESTED` → the assignee's move; surface it (resume path in
   flows/implement.md).
-- `APPROVED` and unmerged → ready to land via review.
+- `APPROVED` and unmerged → if `whoami` is the integrator, ready to land
+  via review; otherwise waiting on the integrator.
 - Closed unmerged → flag it; only prompt for a decision if the current user
   is the assignee or integrator.
 
@@ -349,11 +350,13 @@ For tasks in `review` with a `pr`, when gh is available: `gh pr view <url>
 - Branch-per-task: `dev/<id>-<slug>` (scoped boards:
   `dev/<scope-with-/->-<id>-<slug>`), owned by the task's assignee,
   short-lived, rebased on the integration branch, merged promptly via PR.
-- Merge rights: anyone except the task's assignee may review and merge; the
-  integrator may review anything, including their own work.
+- Review: anyone except the task's assignee; the integrator may review
+  anything, including their own work. Land: only the integrator
+  (`TASKS land` refuses a live merge otherwise; already-merged cleanup
+  stays allowed).
 - The `integrator` (default: board creator; `/dev config integrator <name>`)
   owns the integration branch: default reviewer, conflict arbitration,
-  iteration close.
+  iteration close, and land.
 - Code branches contain code only; the board never rides them — `.tasks/`
   may appear in a feature checkout (inherited from integration), which is
   fine as long as the PR does not modify it.
