@@ -68,6 +68,8 @@ TASKS claim <id> [--assignee <who>] [--branch <b>]
 TASKS diff <id>                         # location + review diff from the
                                         # task worktree (not session cwd);
                                         # implement self-review / resume
+                                        # (review: attaches origin/<branch>
+                                        # if this clone has no checkout)
 TASKS ship <id> --shipped "<what actually shipped>"
                 [--message M] [--title T] [--body B]
                 [--version-intent <intent>] [--base <branch>]

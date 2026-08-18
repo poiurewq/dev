@@ -29,10 +29,11 @@ single id. `/dev auto` stays one task per cycle.
    - `backlog`/`planned`, unassigned or assigned to this user → proceed.
      Picking first is not required; the claim in step 2 assigns it.
    - Assigned to **someone else** → stop and say who owns it; proceed only
-     if the user explicitly reassigns.
+     if the user explicitly reassigns (`TASKS update <id> --assignee <who>`).
+     A review handoff stays `review` — do not claim.
    - `doing` → someone (possibly this user, in another session) is on it;
      confirm before touching it.
-   - `review` with this user's PR → this is the resume path (bottom).
+   - `review` assigned to this user → this is the resume path (bottom).
    - `proposed` → not yet approved; route through flows/review.md first.
    - `needs: decision` → the fork must be decided first (flows/review.md);
      don't implement around an open question.
@@ -223,7 +224,8 @@ single id. `/dev auto` stays one task per cycle.
    auto-start review. Non-integrator implementers: normal handoff is enough.
 
 **Resuming after changes were requested** on the PR: `TASKS diff <id>` first
-(re-orients to the worktree). Then `TASKS collisions` with the task's
+(re-orients to the worktree; a review branch with no local checkout
+attaches `origin/<branch>`). Then `TASKS collisions` with the task's
 `Dev-batch:` ids (the single id if none) — exit 2 is outside occupancy,
 stop; batch peers in review must not false-abort. Then the same flow
 from step 4 on the existing branch; fix on the branch, `TASKS ship <id>

@@ -6,8 +6,8 @@ A repo can hold one board (at <root>/.tasks/) or several (a monorepo with
 above cwd, or an explicit --scope; there is no single-board fallback.
 Checkout-local state lives under the product root: <scope>/.dev/ (root board
 → .dev/ at the primary clone root) — identity, boards cache, board worktree,
-and task worktrees. Paths resolve via the primary clone (git-common-dir), not
-a linked task worktree's toplevel, so board mutations work from task trees.
+and task worktrees. Paths resolve via the hub (git-common-dir, or the worktree
+that already owns .dev/board), not a linked task worktree's toplevel.
 Each board lives ONLY on its integration branch. Mutations go through a
 hidden worktree at <product>/.dev/board on a private branch (_dev-board or
 _dev-board-<scope>), commit there, and push to the integration branch. When
@@ -95,7 +95,7 @@ def worktree_root(cwd=None):
 
 
 def repo_root():
-    """Primary clone / main worktree root — not a linked task worktree.
+    """Primary clone / hub worktree — not a linked task worktree.
 
     Board mutator paths, product .dev/, and git worktree add must use this so
     board commands work when cwd is inside a task worktree. Scope discovery
@@ -108,13 +108,54 @@ def repo_root():
     else:
         # Git < 2.31: no --path-format
         common = git("rev-parse", "--git-common-dir").stdout.strip()
-        if not os.path.isabs(common):
-            common = os.path.abspath(common)
+    if not os.path.isabs(common):
+        common = os.path.abspath(common)
     common = os.path.normpath(common)
-    if os.path.basename(common) == ".git":
+    # Only a .git *directory* is the hub's git dir. --git-common-dir does
+    # not return a worktree's .git file; a relative common dir resolved
+    # against that worktree's cwd can land on it — its parent is the
+    # worktree, not the hub.
+    if os.path.basename(common) == ".git" and os.path.isdir(common):
         return os.path.dirname(common)
-    # Bare or unusual layout: fall back to this worktree's toplevel.
+    hub = hub_from_board_worktrees()
+    if hub:
+        return hub
     return worktree_root()
+
+
+def _is_board_worktree_path(path):
+    """True if path is a board mutator: …/.dev/board (root or scoped)."""
+    norm = os.path.normpath(os.path.realpath(path))
+    return (os.path.basename(norm) == "board"
+            and os.path.basename(os.path.dirname(norm)) == ".dev")
+
+
+def hub_from_board_worktrees(cwd=None):
+    """Hub checkout that already owns a board mutator worktree.
+
+    Used when git-common-dir is not <hub>/.git (bare repo, separate-git-dir).
+    The board path is <hub>/.dev/board or <hub>/<scope>/.dev/board; the hub is
+    that product directory's git toplevel. Does not use worktree-list paths for
+    the hub itself: a separate-git-dir clone lists the git dir, not the tree.
+    Returns None before the first board worktree exists (init).
+    """
+    try:
+        here = worktree_root(cwd)
+    except SystemExit:
+        return None
+    hubs = []
+    for t in list_worktrees(here):
+        if not _is_board_worktree_path(t["path"]):
+            continue
+        product = os.path.dirname(os.path.dirname(os.path.realpath(t["path"])))
+        try:
+            hub = worktree_root(cwd=product)
+        except SystemExit:
+            continue
+        hubs.append(os.path.realpath(hub))
+    if not hubs:
+        return None
+    return min(hubs, key=len)
 
 
 def git_path(root, rel):
@@ -826,23 +867,33 @@ def set_area_overlaps(ids, tasks):
     return pairs
 
 
-def format_area_collisions(task, blockers):
+def format_area_collisions(task, blockers, color=False):
     label = task.get("area") or "(untagged)"
-    head = f"T{task['id']} {label}"
+    tid = f"T{task['id']}"
+    head = (f"{_status_ansi(task['status'], tid)} {_ansi(_DIM, label)}"
+            if color else f"{tid} {label}")
     if not blockers:
-        return f"{head} — clear"
+        clear = _ansi(_OK, "clear") if color else "clear"
+        return f"{head} — {clear}"
     bits = []
     for o in blockers:
         oa = o.get("area") or "(untagged)"
-        bits.append(f"T{o['id']} {o['status']} ({oa})")
-    return f"{head} — blocked: {', '.join(bits)}"
+        oid, st = f"T{o['id']}", o["status"]
+        if color:
+            bits.append(f"{_status_ansi(st, oid)} {_status_ansi(st, st)} ({oa})")
+        else:
+            bits.append(f"{oid} {st} ({oa})")
+    blocked = _ansi(_ERR, "blocked") if color else "blocked"
+    return f"{head} — {blocked}: {', '.join(bits)}"
 
 
-def watch_collision_line(tid, tasks):
+def watch_collision_line(tid, tasks, color=False):
     task = next((t for t in tasks if t["id"] == tid), None)
     if task is None:
-        return f"T{tid} — no such task"
-    return format_area_collisions(task, in_flight_area_collisions(task, tasks))
+        msg = f"T{tid} — no such task"
+        return _ansi(_ERR, msg) if color else msg
+    return format_area_collisions(
+        task, in_flight_area_collisions(task, tasks), color=color)
 
 
 def parse_watch_tid(buf):
@@ -1245,9 +1296,9 @@ def ensure_local_branch(root, branch, start_ref=None):
 def sync_task_branch_from_remote(root, branch):
     """Point local task branch at origin/<branch> when that ref exists.
 
-    Land should start from the PR tip GitHub has, not a stale local ref.
-    Refuses when local is strictly ahead of origin (would discard unpushed
-    commits via reset/--force branch move).
+    Land and review-attach should start from the PR tip, not a stale local
+    ref. Refuses when local is strictly ahead of origin (would discard
+    unpushed commits via reset/--force branch move).
     """
     remote = f"origin/{branch}"
     if not ref_exists(root, remote):
@@ -1258,8 +1309,8 @@ def sync_task_branch_from_remote(root, branch):
                 cwd=root).stdout.strip()
     if ahead not in ("", "0"):
         sys.exit(f"error: local '{branch}' is {ahead} commit(s) ahead of "
-                 f"{remote}; push (or reset to origin) before land so "
-                 f"unpushed commits are not discarded")
+                 f"{remote}; not discarding unpushed commits "
+                 f"(reset to {remote} if this leftover is stale)")
     checkout = branch_checkout_cwd(root, branch)
     if checkout:
         dirty = git("status", "--porcelain", cwd=checkout,
@@ -2181,9 +2232,8 @@ def cmd_claim(args):
     if status == "proposed":
         sys.exit(f"error: T{tid} is proposed; approve via review before claim")
     if status == "review":
-        sys.exit(f"error: T{tid} is in review; do not re-claim — resume on "
-                 f"the existing branch/PR (address review comments there), "
-                 f"or land/cleanup first")
+        sys.exit(f"error: T{tid} is in review; do not claim — resume via "
+                 f"diff (handoff: update --assignee first)")
     if (meta.get("needs") or "").strip() == "decision":
         sys.exit(f"error: T{tid} has needs: decision; resolve before claim")
     if not split_areas(meta.get("area", "")):
@@ -2292,11 +2342,30 @@ def find_open_pr_for_branch(root, branch, base):
     return (items[0].get("url") or "").strip()
 
 
-def ship_work_cwd(root, scope, meta, branch):
+def attach_review_branch(root, scope, tid, title, branch, integration):
+    """Attach a recorded review branch. Never create from integration."""
+    remote = f"origin/{branch}"
+    if has_remote(root):
+        git("fetch", "origin",
+            f"+refs/heads/{branch}:refs/remotes/origin/{branch}",
+            cwd=root, check=False)
+    if not ref_exists(root, remote):
+        sys.exit(f"error: T{tid} is in review but '{branch}' is not "
+                 f"checked out and {remote} is missing")
+    sync_task_branch_from_remote(root, branch)
+    ready = resolve_task_ready_path(
+        root, scope, tid, title, branch, integration)
+    print(f"note: attached review branch '{branch}'")
+    return ready
+
+
+def ship_work_cwd(root, scope, meta, branch, integration):
     """Directory that has the task branch checked out for committing/pushing.
 
     Prefer a claim-style linked worktree under .dev/worktrees/; fall back to
-    any checkout of the branch. Soft-warn when not under .dev/worktrees/.
+    any checkout of the branch. A review task with no checkout attaches
+    origin/<branch> (never created from integration). Soft-warn when not
+    under .dev/worktrees/.
     """
     work = None
     for path in find_task_worktree_paths(root, scope, meta["id"], branch):
@@ -2309,6 +2378,9 @@ def ship_work_cwd(root, scope, meta, branch):
     if work is None:
         work = branch_checkout_cwd(root, branch)
     if not work:
+        if (meta.get("status") or "").strip() == "review":
+            return attach_review_branch(
+                root, scope, meta["id"], meta["title"], branch, integration)
         sys.exit(f"error: task branch '{branch}' is not checked out anywhere; "
                  f"run claim first")
     if not path_under_task_worktrees(root, scope, work):
@@ -2325,8 +2397,10 @@ def cmd_diff(args):
     tid = meta["id"]
     branch = task_branch_name(meta)
     if not branch:
+        if meta["status"] == "review":
+            sys.exit(f"error: T{tid} is in review with no branch")
         sys.exit(f"error: T{tid} has no branch; run claim first")
-    work = ship_work_cwd(root, scope, meta, branch)
+    work = ship_work_cwd(root, scope, meta, branch, integration)
     base = f"origin/{integration}"
     if not ref_exists(root, base):
         base = integration
@@ -2829,6 +2903,8 @@ def cmd_ship(args):
     prefix = title_prefix(idx, tid)
     branch = task_branch_name(meta)
     if not branch:
+        if meta["status"] == "review":
+            sys.exit(f"error: T{tid} is in review with no branch")
         sys.exit(f"error: T{tid} has no branch; run claim first")
     if meta["status"] in ("done", "later", "not-planned", "proposed"):
         sys.exit(f"error: T{tid} is {meta['status']}; cannot ship")
@@ -2848,7 +2924,7 @@ def cmd_ship(args):
     if not has_remote(root):
         sys.exit("error: no origin remote; cannot ship")
 
-    work = ship_work_cwd(root, scope, meta, branch)
+    work = ship_work_cwd(root, scope, meta, branch, integration)
     print(f"T{tid}: ship from {work} (branch {branch})")
 
     if worktree_is_dirty(work):
@@ -3672,21 +3748,71 @@ def cmd_collisions(args):
         sys.exit(2)
 
 
-def fmt_line(t, tasks):
+# 16-color SGR. Paint-time only — never write these into TASKS.md.
+_DIM, _OK, _ERR, _NEEDS = "2", "32", "31", "33;1"
+_STATUS_COLOR = {
+    "proposed": "2",      # dim
+    "backlog": "34",      # blue
+    "planned": "36",      # cyan
+    "doing": "33",        # yellow
+    "review": "35",       # magenta
+    "done": "32",         # green
+    "later": "2",
+    "not-planned": "2",
+}
+_ASSIGNEE_COLORS = (
+    "91", "92", "93", "94", "95", "96",
+    "31", "32", "33", "34", "35", "36",
+)
+
+
+def _use_color():
+    """Color tty stdout unless NO_COLOR is set or TERM is dumb."""
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("TERM") == "dumb":
+        return False
+    return sys.stdout.isatty()
+
+
+def _ansi(code, text):
+    return f"\033[{code}m{text}\033[0m"
+
+
+def _status_ansi(status, text):
+    return _ansi(_STATUS_COLOR.get(status, "0"), text)
+
+
+def _assignee_ansi(name, text):
+    n = 0
+    for c in name:
+        n = (n * 31 + ord(c)) & 0xFFFFFFFF
+    return _ansi(_ASSIGNEE_COLORS[n % len(_ASSIGNEE_COLORS)], text)
+
+
+def fmt_line(t, tasks, color=False):
     by_id = {x["id"]: x for x in tasks}
     blocked = any(by_id.get(d, {}).get("status") != "done" for d in t["deps"])
-    parts = [f"T{t['id']}", f"[{t['status']}]"]
+    tid, st = f"T{t['id']}", f"[{t['status']}]"
+    if color:
+        tid, st = _status_ansi(t["status"], tid), _status_ansi(t["status"], st)
+    parts = [tid, st]
     if t.get("area"):
-        parts.append(f"({t['area']})")
+        area = f"({t['area']})"
+        parts.append(_ansi(_DIM, area) if color else area)
     parts.append(t["title"])
     if t.get("assignee"):
-        parts.append(f"@{t['assignee']}")
+        who = f"@{t['assignee']}"
+        parts.append(_assignee_ansi(t["assignee"], who) if color else who)
     if t.get("needs"):
-        parts.append(f"⚑needs-{t['needs']}")
+        flag = f"⚑needs-{t['needs']}"
+        parts.append(_ansi(_NEEDS, flag) if color else flag)
     if is_umbrella(t):
-        parts.append(umbrella_rollup(t, tasks))
+        roll = umbrella_rollup(t, tasks)
+        parts.append(_ansi(_DIM, roll) if color else roll)
     elif blocked and t["status"] not in ("review",) + TERMINAL:
-        parts.append(f"⊘blocked-by:{','.join(str(d) for d in t['deps'])}")
+        blk = f"⊘blocked-by:{','.join(str(d) for d in t['deps'])}"
+        parts.append(_ansi(_ERR, blk) if color else blk)
     return " ".join(parts)
 
 
@@ -3694,8 +3820,10 @@ def _status_label(status):
     return STATUS_LABEL.get(status, status.capitalize())
 
 
-def _fmt_ids(col):
-    return " ".join(f"T{t['id']}" for t in col)
+def _fmt_ids(col, color=False):
+    if not color:
+        return " ".join(f"T{t['id']}" for t in col)
+    return " ".join(_status_ansi(t["status"], f"T{t['id']}") for t in col)
 
 
 def _fmt_count(col):
@@ -3703,22 +3831,32 @@ def _fmt_count(col):
 
 
 def _index_block(rows):
-    """One line per (label, rhs) row; labels padded to a shared width."""
+    """One line per (label, rhs[, sgr]) row; labels padded to a shared width.
+
+    Optional sgr colors the label only. Width uses the uncolored label so
+    ANSI codes do not break the column.
+    """
     if not rows:
         return []
-    width = max(len(label) for label, _ in rows)
-    return [f"{label:<{width}}  {rhs}".rstrip() for label, rhs in rows]
+    width = max(len(row[0]) for row in rows)
+    lines = []
+    for row in rows:
+        label, rhs = row[0], row[1]
+        sgr = row[2] if len(row) > 2 else None
+        shown = _ansi(sgr, label) if sgr else label
+        lines.append(f"{shown}{' ' * (width - len(label))}  {rhs}".rstrip())
+    return lines
 
 
-def _list_block(visible, tasks, expand=False):
+def _list_block(visible, tasks, expand=False, color=False):
     """In-play tasks one per line; --expand includes done/later/not-planned."""
     rank = {s: i for i, s in enumerate(STATUSES)}
     listed = [t for t in visible if expand or t["status"] not in TERMINAL]
     listed.sort(key=lambda t: (rank.get(t["status"], 99), t["id"]))
-    return [fmt_line(t, tasks) for t in listed]
+    return [fmt_line(t, tasks, color=color) for t in listed]
 
 
-def _board_by_status(tasks, covered, expand=False):
+def _board_by_status(tasks, covered, expand=False, color=False):
     visible = [t for t in tasks if t["id"] not in covered]
     rows = []
     for status in STATUSES:
@@ -3726,17 +3864,18 @@ def _board_by_status(tasks, covered, expand=False):
         if not col:
             continue
         fold = status in TERMINAL and not expand
-        rhs = _fmt_count(col) if fold else _fmt_ids(col)
-        rows.append((_status_label(status), rhs))
+        rhs = _fmt_count(col) if fold else _fmt_ids(col, color=color)
+        sgr = _STATUS_COLOR.get(status) if color else None
+        rows.append((_status_label(status), rhs, sgr))
     lines = _index_block(rows)
-    listed = _list_block(visible, tasks, expand=expand)
+    listed = _list_block(visible, tasks, expand=expand, color=color)
     if listed:
         lines.append("")
         lines.extend(listed)
     return lines
 
 
-def _board_by_area(bw, scope, tasks, covered, expand=False):
+def _board_by_area(bw, scope, tasks, covered, expand=False, color=False):
     """Group visible tasks by area. Multi-area tasks appear under each area.
 
     Index order: areas.md order, then other named areas (sorted), then
@@ -3765,32 +3904,28 @@ def _board_by_area(bw, scope, tasks, covered, expand=False):
                 buckets[a].append(t)
             else:
                 ad_hoc.setdefault(a, []).append(t)
-    rows = [(name, _fmt_ids(buckets[name])) for name in known]
-    rows.extend((name, _fmt_ids(ad_hoc[name])) for name in sorted(ad_hoc))
+    rows = [(name, _fmt_ids(buckets[name], color=color)) for name in known]
+    rows.extend((name, _fmt_ids(ad_hoc[name], color=color))
+                for name in sorted(ad_hoc))
     if all_col:
-        rows.append(("all", _fmt_ids(all_col)))
+        rows.append(("all", _fmt_ids(all_col, color=color)))
     if untagged:
-        rows.append(("(untagged)", _fmt_ids(untagged)))
+        rows.append(("(untagged)", _fmt_ids(untagged, color=color)))
     if not expand:
         for status in TERMINAL:
             col = [t for t in visible if t["status"] == status]
             if col:
-                rows.append((_status_label(status), _fmt_count(col)))
+                sgr = _STATUS_COLOR.get(status) if color else None
+                rows.append((_status_label(status), _fmt_count(col), sgr))
     lines = _index_block(rows)
-    listed = _list_block(visible, tasks, expand=expand)
+    listed = _list_block(visible, tasks, expand=expand, color=color)
     if listed:
         lines.append("")
         lines.extend(listed)
     return lines
 
 
-def _render_board(args):
-    """Fetch, write TASKS.md, return (board text, tasks)."""
-    root, scope, branch, bw = ctx()
-    cfg = read_board_cfg(bw, scope)
-    tasks = all_tasks(bw, scope)
-    expand = bool(getattr(args, "expand", False))
-    by_area = bool(getattr(args, "by_area", False))
+def _board_text(cfg, scope, bw, tasks, expand=False, by_area=False, color=False):
     covered = set() if expand else covered_by_umbrellas(tasks)
     title = f"# Board — iteration {iteration_label(cfg)}"
     if scope != ".":
@@ -3799,13 +3934,32 @@ def _render_board(args):
         title += " · by area"
     lines = [title, ""]
     if by_area:
-        lines.extend(_board_by_area(bw, scope, tasks, covered, expand=expand))
+        lines.extend(_board_by_area(
+            bw, scope, tasks, covered, expand=expand, color=color))
     else:
-        lines.extend(_board_by_status(tasks, covered, expand=expand))
-    out = "\n".join(lines)
+        lines.extend(_board_by_status(
+            tasks, covered, expand=expand, color=color))
+    return "\n".join(lines)
+
+
+def _render_board(args):
+    """Fetch, write plain TASKS.md, return (plain, display, tasks).
+
+    display is colorized when stdout is a color-capable tty. TASKS.md is
+    always the plain text.
+    """
+    root, scope, branch, bw = ctx()
+    cfg = read_board_cfg(bw, scope)
+    tasks = all_tasks(bw, scope)
+    expand = bool(getattr(args, "expand", False))
+    by_area = bool(getattr(args, "by_area", False))
+    plain = _board_text(cfg, scope, bw, tasks, expand=expand, by_area=by_area)
     with open(os.path.join(root, scope, "TASKS.md"), "w") as f:
-        f.write(out)
-    return out.rstrip(), tasks
+        f.write(plain)
+    display = (_board_text(cfg, scope, bw, tasks, expand=expand,
+                           by_area=by_area, color=True)
+               if _use_color() else plain)
+    return plain.rstrip(), display.rstrip(), tasks
 
 
 def _clear_screen():
@@ -3891,7 +4045,8 @@ def _paint_watch(out, by_area, buf, result):
     print(out)
     print()
     other = "by status" if by_area else "by area"
-    print(f"r refresh  a {other}  q quit  · type id↵")
+    help_line = f"r refresh  a {other}  q quit  · type id↵"
+    print(_ansi(_DIM, help_line) if _use_color() else help_line)
     if buf:
         print(f"> {buf}")
     if result:
@@ -3921,11 +4076,12 @@ def cmd_board(args):
         try:
             while True:
                 by_area = bool(getattr(args, "by_area", False))
-                out, tasks = _render_board(args)
+                _plain, display, tasks = _render_board(args)
                 if last_tid is not None:
-                    result = watch_collision_line(last_tid, tasks)
+                    result = watch_collision_line(
+                        last_tid, tasks, color=_use_color())
                 while True:
-                    _paint_watch(out, by_area, buf, result)
+                    _paint_watch(display, by_area, buf, result)
                     key = _read_key(cooked=old_term is None)
                     if key in ("q", "Q"):
                         return
@@ -3950,12 +4106,14 @@ def cmd_board(args):
                         tid = parse_watch_tid(buf)
                         buf = ""
                         if tid is None:
-                            result = "not a task id"
+                            result = (_ansi(_ERR, "not a task id")
+                                      if _use_color() else "not a task id")
                             last_tid = None
                             continue
-                        out, tasks = _render_board(args)
+                        _plain, display, tasks = _render_board(args)
                         last_tid = tid
-                        result = watch_collision_line(tid, tasks)
+                        result = watch_collision_line(
+                            tid, tasks, color=_use_color())
                         continue
                     if not buf and key in "tT":
                         buf = key
@@ -3970,7 +4128,7 @@ def cmd_board(args):
                 import termios
                 termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
         return
-    print(_render_board(args)[0])
+    print(_render_board(args)[1])
 
 
 # ---------- iterations ----------

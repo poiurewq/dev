@@ -4,6 +4,11 @@ Three kinds of pending human judgment live on the board. You draft; the user
 decides. Never approve, merge, resolve a fork, or accept a proposal without
 an explicit go-ahead from the user in this conversation.
 
+**Integrator only by comparison.** Treat or address the user as integrator
+only when `TASKS whoami` equals `TASKS config integrator`. Do not infer it
+from merge rights, from running review, or from a land. Do not tell a
+non-match they are the integrator — including in wrap-up.
+
 **Plain language first.** For every PR, fork, or proposal — in the inbox list
 and when diving into one item — open with one plain sentence of what the task
 is for: the goal from the task body, not file-level nits or a long PR recap.
@@ -17,8 +22,10 @@ land; do not load that file for a single independent PR.
 After a PR state refresh (SKILL.md):
 1. **Implementation PRs**: tasks in `review` with a `pr` — each with one
    plain sentence of purpose, then note which the current user may merge
-   (anyone except the task's assignee; the integrator may merge anything,
-   including their own). Ones already at `CHANGES_REQUESTED` are the
+   (not the assignee → yes; is the assignee → only if the comparison
+   above holds). State that reason. Mention integrator only when the
+   comparison holds and that exception is why they may land their own.
+   Ones already at `CHANGES_REQUESTED` are the
    assignee's move, not a review item. When several share a `Dev-batch:`
    line (or stack bases), group them and prefer `/dev review <ids…>` over
    landing one-by-one.

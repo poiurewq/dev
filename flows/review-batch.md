@@ -87,7 +87,8 @@ For each id in order:
 
 ### 3. Report
 
-What was approved, restacked, landed, or left open. If `whoami` is the
-integrator and work remains, note it — but don't auto-start another review
-cycle in the same breath as implement (implement wrap-up still prefers a new
-session; review-batch itself is already the review session).
+What was approved, restacked, landed, or left open. If `whoami` equals
+`TASKS config integrator` and work remains, note it — but don't auto-start
+another review cycle in the same breath as implement (implement wrap-up
+still prefers a new session; review-batch itself is already the review
+session). Do not tell a non-match they are the integrator.
