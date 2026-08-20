@@ -46,5 +46,8 @@ is not yet knowable. After triage, do the work and mention the path once
      directions** — must something else land first (`--deps`), or does an
      existing task now depend on this one (update *its* deps)? Propose the
      links; don't invent ordering that isn't real.
+   - A neighbour marked `☂` is an **umbrella** and may already cover this
+     cluster → propose the new task as its child (`TASKS update <umbrella>
+     --deps <existing+new>`). That is membership, not ordering.
 3. `TASKS add --title "..." [--area m] [--deps 1,2] [--desc "..."]`, then
    show the task as recorded (the script prints it).

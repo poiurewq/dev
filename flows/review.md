@@ -46,9 +46,13 @@ path.
 
 ## Single-id gate (before reviewing one implementation PR)
 
-Run `TASKS batch-gate --ids <id>`. Exit 2 means open batch co-members are
-missing — surface the output and **stop** (hard refuse); tell the user to
-re-run with the full required set. Exit 0 → continue below.
+Run `TASKS batch-gate --ids <id>`. Exit 2 means an open **stack parent**
+is missing — surface the output and **stop** (hard refuse); a child cannot
+land before the PR it is based on, so the user re-runs with the parent
+included. Exit 0 → continue below, but if the gate printed a **partial
+batch** advisory, relay it once: those PRs shipped together and share one
+version bump, so offer reviewing the whole set. The user may still review
+just this one — landing it is inert to its siblings.
 
 ## Reviewing an implementation PR
 

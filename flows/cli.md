@@ -97,8 +97,11 @@ TASKS ship <id> --shipped "<what actually shipped>"
                                         # if that branch moved since the
                                         # stack); --batch stamps Dev-batch
                                         # on PR + task body
-TASKS batch-gate --ids <id,id,…>        # exit 2 if selection omits open
-                                        # co-members of a Dev-batch/stack
+TASKS batch-gate --ids <id,id,…>        # exit 2 if selection omits an open
+                                        # stack parent (child before parent
+                                        # is the one land order that still
+                                        # breaks); a partial Dev-batch only
+                                        # prints an advisory, exit 0
 TASKS restack --ids <id,id,…> [--after N] [--onto <ref>]
               [--retarget] [--dry-run]  # fail-closed stack rebase (plan,
                                         # then apply unless --dry-run);

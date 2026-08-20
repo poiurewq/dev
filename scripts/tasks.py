@@ -18,7 +18,7 @@ Stdlib + git for board CRUD. Git/gh lifecycle helpers: `claim` (implement
 setup, optionally stacked on another task's review tip), `ship`
 (commit/push/PR, PR base derived for a stack; optional Dev-batch stamp),
 `preflight`,
-`restack` (fail-closed stack rebase), `batch-gate` (review-set completeness),
+`restack` (fail-closed stack rebase), `batch-gate` (stack land order),
 `land` / `cleanup`, `iteration-land`. Never auto-approve reviews.
 """
 import argparse
@@ -237,13 +237,14 @@ def append_ignore_line(path, line):
 # Thin wrapper init writes. __TASKS_PY__ is replaced with repr(path).
 BOARD_VIEWER_SCRIPT = '''\
 #!/usr/bin/env python3
-"""Local board viewer (r/a/e/q; arrows scroll; type id↵). Written by dev init; left alone if you edit it."""
+"""Local board viewer (r/a/e/q; arrows scroll; type id↵). `./board update` rewrites this file from the installed skill. Written by dev init; left alone if you edit it."""
 import os, sys
 TASKS = __TASKS_PY__
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 if not os.path.isfile(TASKS):
     sys.exit("error: dev skill not found at %s — delete ./board and re-run init" % TASKS)
-os.execv(sys.executable, [sys.executable, TASKS, "board", "--watch"])
+ARGS = ["--refresh-viewer"] if sys.argv[1:2] == ["update"] else ["--watch"]
+os.execv(sys.executable, [sys.executable, TASKS, "board"] + ARGS)
 '''
 
 # Code lines a generated ./board may contain (any template generation).
@@ -256,7 +257,9 @@ _STOCK_VIEWER_LINE = re.compile(
     r"|os\.chdir\(os\.path\.dirname\(os\.path\.abspath\(__file__\)\)\)"
     r"|if not os\.path\.isfile\(TASKS\):"
     r"|    sys\.exit\(.+\)"
+    r"|ARGS = \[\"--refresh-viewer\"\] if sys\.argv\[1:2\] == \[\"update\"\] else \[\"--watch\"\]"
     r"|os\.execv\(sys\.executable, \[sys\.executable, TASKS, \"board\", \"--watch\"\]\)"
+    r"|os\.execv\(sys\.executable, \[sys\.executable, TASKS, \"board\"\] \+ ARGS\)"
     r")$"
 )
 
@@ -281,15 +284,16 @@ def viewer_is_stock(text):
         count=1,
     )
     lines = [ln.rstrip() for ln in text.splitlines() if ln.strip()]
-    if not any('TASKS, "board", "--watch"' in ln for ln in lines):
+    if not any('TASKS, "board"' in ln for ln in lines):
         return False
     return all(_STOCK_VIEWER_LINE.match(ln) for ln in lines)
 
 
-def ensure_board_viewer(root, scope):
+def ensure_board_viewer(root, scope, force=False):
     """Write <product>/board if missing or still a stock wrapper.
 
-    Returns (path, wrote). Leaves a user-edited file and a directory alone.
+    Returns (path, wrote). Leaves a user-edited file and a directory alone;
+    force overwrites an edited one (./board update).
     """
     dest = viewer_path(root, scope)
     if os.path.isdir(dest):
@@ -299,8 +303,10 @@ def ensure_board_viewer(root, scope):
         try:
             existing = open(dest, encoding="utf-8").read()
         except (OSError, UnicodeDecodeError):
+            existing = None
+        if existing == content:
             return dest, False
-        if existing == content or not viewer_is_stock(existing):
+        if not force and (existing is None or not viewer_is_stock(existing)):
             return dest, False
     with open(dest, "w", encoding="utf-8") as f:
         f.write(content)
@@ -2546,77 +2552,23 @@ def load_task_pr_stack_info(root, bw, scope, tid):
     }
 
 
-def discover_batch_ids_for_task(root, bw, scope, tid, integration):
-    """Full batch id list for a task: stamp first, else stack component."""
-    info = load_task_pr_stack_info(root, bw, scope, tid)
-    stamped = parse_dev_batch(info["body"]) or parse_dev_batch(info["task_body"])
-    if stamped:
-        return stamped
-    # Fallback: connected component via PR base↔head among status=review.
-    return stack_component_ids(root, bw, scope, tid, integration)
-
-
-def stack_component_ids(root, bw, scope, seed_tid, integration):
-    """Connected component of review tasks linked by PR base == other head."""
-    review = [t for t in all_tasks(bw, scope) if t["status"] == "review"]
+def review_stack_infos(root, bw, scope):
+    """PR/stack info for every task currently in review, keyed by id."""
     infos = {}
-    for t in review:
-        infos[t["id"]] = load_task_pr_stack_info(root, bw, scope, t["id"])
-    if seed_tid not in infos:
-        # Seed may still be review-stamped but status moved; include alone.
-        return [seed_tid] if find_task(bw, scope, seed_tid) else []
-    # Map branch name -> task id for members
-    by_branch = {}
-    for tid, inf in infos.items():
-        b = (inf.get("branch") or inf.get("head") or "").strip()
-        if b:
-            by_branch[b] = tid
-    # Undirected edges via base pointing at another member's branch
-    adj = {tid: set() for tid in infos}
-    for tid, inf in infos.items():
-        base = (inf.get("base") or "").strip()
-        if not base or base == integration:
-            continue
-        parent = by_branch.get(base)
-        if parent is not None and parent != tid:
-            adj[tid].add(parent)
-            adj[parent].add(tid)
-    # BFS from seed
-    seen = set()
-    stack = [seed_tid]
-    while stack:
-        cur = stack.pop()
-        if cur in seen or cur not in adj:
-            continue
-        seen.add(cur)
-        stack.extend(adj[cur] - seen)
-    return sorted(seen) if seen else [seed_tid]
-
-
-def open_batch_comembers(root, bw, scope, batch_ids):
-    """Subset of batch_ids still in review with an open PR."""
-    open_ids = []
-    for tid in batch_ids:
-        try:
-            meta = find_task(bw, scope, tid)
-        except SystemExit:
-            continue
-        if meta.get("status") != "review":
-            continue
-        pr = (meta.get("pr") or "").strip()
-        if not pr:
-            continue
-        info = pr_view(root, pr, soft=True)
-        if pr_is_open(info):
-            open_ids.append(tid)
-    return open_ids
+    for t in all_tasks(bw, scope):
+        if t["status"] == "review":
+            infos[t["id"]] = load_task_pr_stack_info(root, bw, scope, t["id"])
+    return infos
 
 
 def cmd_batch_gate(args):
-    """Refuse partial review of an open Dev-batch (or stack component).
+    """Gate a review selection: refuse a missing stack parent, warn on a
+    partial Dev-batch.
 
-    Exit 0 if selection covers every still-open co-member of the batch(es)
-    touched by the selection. Exit 2 if a proper subset (list missing ids).
+    Landing merges without rewriting siblings, so a partial batch is only
+    an advisory (they shipped together and share one version bump). The one
+    order that still breaks is landing a child before the parent its PR is
+    based on — that stays a hard refuse (exit 2).
     """
     root, scope, integration, bw = ctx()
     selected = parse_id_list(args.ids or "")
@@ -2624,38 +2576,60 @@ def cmd_batch_gate(args):
         sys.exit("error: batch-gate requires --ids <id,id,…>")
 
     require_gh(root)
-    # Union of still-open co-members for every selected id's batch
-    required = set()
     for tid in selected:
         try:
             find_task(bw, scope, tid)
         except SystemExit:
             sys.exit(f"error: no task with id {tid}")
-        batch = discover_batch_ids_for_task(root, bw, scope, tid, integration)
-        open_ids = open_batch_comembers(root, bw, scope, batch)
-        if not open_ids:
-            continue
-        required.update(open_ids)
 
+    infos = review_stack_infos(root, bw, scope)
+    parent_map = build_stack_parent_map(infos, integration)
     selected_set = set(selected)
-    # If nothing required (no open batch), selection is fine.
-    if not required:
-        print(f"batch-gate: ok — no open batch co-members for "
-              f"{', '.join(f'T{i}' for i in selected)}")
+
+    # Hard gate: every open stack ancestor of a selected task must be selected.
+    missing_parents = []
+    for tid in selected:
+        cur, seen = tid, {tid}
+        while cur in parent_map:
+            parent = parent_map[cur]
+            if parent in seen:
+                break
+            seen.add(parent)
+            if parent not in selected_set and infos.get(parent, {}).get("open"):
+                missing_parents.append((cur, parent))
+            cur = parent
+    if missing_parents:
+        print("batch-gate: stack parent missing — a child cannot land "
+              "before its parent:")
+        for child, parent in missing_parents:
+            print(f"  T{child} is stacked on T{parent} "
+                  f"(PR base {infos[parent]['branch']})")
+        required = sorted(selected_set | {p for _, p in missing_parents})
+        print(f"  re-run: /dev review "
+              f"{','.join(str(i) for i in required)}")
+        sys.exit(2)
+
+    # Advisory: co-members of a Dev-batch left out of the selection.
+    batch_missing = set()
+    for tid in selected:
+        info = infos.get(tid) or load_task_pr_stack_info(root, bw, scope, tid)
+        stamped = parse_dev_batch(info["body"]) or parse_dev_batch(
+            info["task_body"])
+        for other in stamped:
+            if other in selected_set:
+                continue
+            if infos.get(other, {}).get("open"):
+                batch_missing.add(other)
+    if batch_missing:
+        print("batch-gate: partial batch — these shipped together and share "
+              "one version bump:")
+        print(f"  not selected: "
+              f"{', '.join(f'T{i}' for i in sorted(batch_missing))}")
+        print(f"  review the set: /dev review "
+              f"{','.join(str(i) for i in sorted(selected_set | batch_missing))}")
         return
 
-    missing = sorted(required - selected_set)
-    if missing:
-        print(f"batch-gate: incomplete set — still open co-members missing: "
-              f"{', '.join(f'T{i}' for i in missing)}")
-        print(f"  selected: {', '.join(f'T{i}' for i in selected)}")
-        print(f"  required open set: "
-              f"{', '.join(f'T{i}' for i in sorted(required))}")
-        print(f"  re-run: /dev review "
-              f"{','.join(str(i) for i in sorted(required))}")
-        sys.exit(2)
-    print(f"batch-gate: ok — "
-          f"{', '.join(f'T{i}' for i in sorted(required))}")
+    print(f"batch-gate: ok — {', '.join(f'T{i}' for i in selected)}")
 
 
 def build_stack_parent_map(infos, integration):
@@ -4295,8 +4269,31 @@ def _paint_watch(out, by_area, expand, buf, result, offset):
     return offset
 
 
+def cmd_board_refresh_viewer(root, scope):
+    """./board update: rewrite the wrapper from this skill's template."""
+    dest = viewer_path(root, scope)
+    if os.path.isdir(dest):
+        sys.exit(f"error: {VIEWER_NAME} is a directory")
+    edited = False
+    if os.path.isfile(dest):
+        try:
+            edited = not viewer_is_stock(open(dest, encoding="utf-8").read())
+        except (OSError, UnicodeDecodeError):
+            edited = True
+    _, wrote = ensure_board_viewer(root, scope, force=True)
+    if not wrote:
+        print(f"viewer: ./{VIEWER_NAME} already current")
+    elif edited:
+        print(f"viewer: rewrote edited ./{VIEWER_NAME} from {os.path.abspath(__file__)}")
+    else:
+        print(f"viewer: refreshed ./{VIEWER_NAME}")
+
+
 def cmd_board(args):
     root, scope, _branch, _bw = ctx()
+    if getattr(args, "refresh_viewer", False):
+        cmd_board_refresh_viewer(root, scope)
+        return
     _, wrote = ensure_board_viewer(root, scope)
     watch = bool(getattr(args, "watch", False))
     if wrote and not (watch and sys.stdin.isatty()):
@@ -4800,6 +4797,9 @@ def main():
                    help="interactive: r refresh, a toggle by-area, "
                         "e toggle expand, q quit, arrows scroll, type "
                         "id+Enter for area collisions (used by ./board)")
+    s.add_argument("--refresh-viewer", action="store_true",
+                   help="rewrite ./board from this skill's template, even if "
+                        "edited, then exit (used by ./board update)")
     s.set_defaults(fn=cmd_board)
 
     s = sub.add_parser("iteration", help="show current iteration")
@@ -4879,7 +4879,8 @@ def main():
     s.set_defaults(fn=cmd_ship)
 
     s = sub.add_parser("batch-gate",
-                       help="exit 2 if --ids is a proper subset of an open Dev-batch")
+                       help="exit 2 if --ids omits an open stack parent "
+                            "(a partial Dev-batch only warns)")
     s.add_argument("--ids", required=True,
                    help="selected task ids, e.g. 19,20 or 19,20,22,23")
     s.set_defaults(fn=cmd_batch_gate)

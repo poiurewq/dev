@@ -1,22 +1,25 @@
 # Multi-task review batch
 
 Loaded only from `flows/review.md` when the user asked for several task ids
-at once (or "all under umbrella …"). Do **not** load this file for a solitary
-independent PR with no open batch co-members. Never auto-expand a refused
-single-id selection — surface `batch-gate` output and stop; the user re-runs
-with the full open set.
+at once (or "all under umbrella …"). Do **not** load this file for a single
+id — a lone PR stays on the single-id path even when open batch co-members
+exist (the gate only advises); a missing stack parent refuses there rather
+than expanding into this file. Never auto-expand a selection the gate
+refused or advised on — surface `batch-gate` output and let the user re-run
+with the set they want.
 
 ## When this applies
 
 - Explicit multi-id: `/dev review 19, 20, 22` (or space-separated).
 - **All tasks under an umbrella** in `review`: expand that umbrella's `deps`
   recursively to leaves; keep only those currently in `review` with a `pr`.
-- Single-id that is part of a still-open Dev-batch/stack: `batch-gate`
-  exit 2 — **hard refuse**, list missing ids; do not review or expand.
+- Single-id whose open **stack parent** is not selected: `batch-gate` exit
+  2 — **hard refuse**, list the missing parents; do not review or expand.
+- Single-id that is part of a still-open Dev-batch: `batch-gate` **advises**
+  (exit 0). Relay it and offer the full set; the user decides.
 
-Non-goals: auto multi-review; auto-expand after a gate refuse; pairwise
-sibling `merge-tree`; an escape hatch to force single-id review of an open
-batch.
+Non-goals: auto multi-review; auto-expand after a gate refuse or advisory;
+pairwise sibling `merge-tree`.
 
 ## Philosophy (two phases)
 
@@ -37,7 +40,8 @@ edges among them.
 
 1. Resolve every id (unknown → stop; no partial batch). Drop duplicates.
 2. `TASKS batch-gate --ids <all selected>`. Exit 2 → surface the script
-   output (missing co-members) and **stop**. Do not review a proper subset.
+   output (missing stack parents) and **stop**. A partial-batch advisory on
+   exit 0 is relayed, not enforced — the user picks the set.
 3. Load each task: must be `review` with a `pr` (or already `done`/merged —
    skip with a note). Refuse `proposed` / open `needs: decision` in the set
    for this path (handle those via the normal inbox).

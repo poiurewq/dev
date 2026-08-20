@@ -72,7 +72,8 @@ user add one before going further.
      Init writes a gitignored `./board` viewer at the product root
      (`r` refresh, `a` toggle by-area, `e` toggle expand, `q` quit, arrows scroll) if missing, and refreshes
      it when it is still a stock wrapper. `TASKS board` does the same. A
-     user-edited `./board` is left alone.
+     user-edited `./board` is left alone — `./board update` rewrites it from
+     the installed skill anyway.
    - *Areas*: first give the user this primer (verbatim or near):
 
      > Areas are coarse labels for regions of the codebase. Every task
