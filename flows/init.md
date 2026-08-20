@@ -70,7 +70,7 @@ user add one before going further.
    - Run `TASKS init --name <handle> [--scope s] [--integration b] [--parent p]
      [--iteration N] [--iteration-name <name>] [--iteration-started YYYY-MM-DD]`.
      Init writes a gitignored `./board` viewer at the product root
-     (`r` refresh, `a` toggle by-area, `q` quit) if missing, and refreshes
+     (`r` refresh, `a` toggle by-area, `q` quit, arrows scroll) if missing, and refreshes
      it when it is still a stock wrapper. `TASKS board` does the same. A
      user-edited `./board` is left alone.
    - *Areas*: first give the user this primer (verbatim or near):
@@ -119,4 +119,4 @@ user add one before going further.
    still goes only through `TASKS`, never hand-edited.
 
 7. Report what was set up: scope, integration branch, integrator, areas, gh
-   status, and the `./board` viewer (`r` refresh, `a` toggle by-area, `q` quit).
+   status, and the `./board` viewer (`r` refresh, `a` toggle by-area, `q` quit, arrows scroll).

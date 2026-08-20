@@ -48,8 +48,9 @@ TASKS board [--expand] [--by-area] [--watch]
                                         # umbrella children; done/later/
                                         # not-planned fold to a count;
                                         # --expand lists children and those
-                                        # three; --watch: r/a/q, type id↵
-                                        # for area collisions (./board)
+                                        # three; --watch: r/a/q, arrows
+                                        # scroll, type id↵ for area
+                                        # collisions (./board)
 TASKS iteration
 TASKS iteration-close [--force]
 TASKS iteration-new <branch> [--parent <branch>] [--name <name>]
@@ -96,14 +97,15 @@ TASKS restack --ids <id,id,…> [--after N] [--onto <ref>]
                                         # is outside the set; --onto rebases
                                         # every target onto that ref (no
                                         # cascade — the default keeps in-set
-                                        # stack parents); destack onto a
+                                        # stack parents); moving onto a
                                         # new base excludes the old parent
-                                        # tip (no squash replay)
+                                        # tip (no duplicate replay)
 TASKS preflight [--park|--discard]      # local integration ahead of origin
                                         # (check exits 2 if in-scope ahead;
                                         # --park / --discard are interactive)
-TASKS land <id>                         # integrator-only merge: destack
-                                        # children first, then merge,
-                                        # cleanup, done
+TASKS land <id>                         # integrator-only merge commit (never
+                                        # squash, never rewrites the branch):
+                                        # merge, retarget stacked children to
+                                        # integration, cleanup, done
 TASKS cleanup <id>                      # worktree + branch prune (branch only if PR MERGED)
 ```

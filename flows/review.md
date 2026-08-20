@@ -66,10 +66,12 @@ re-run with the full required set. Exit 0 → continue below.
      the current user, **skip** it — GitHub rejects self-approves. If the
      comparison above does not hold, **stop after approve** — do not run
      `TASKS land`; only the integrator can land. Otherwise run
-     `TASKS land <id>`, which owns destack of immediate stacked children
-     onto integration (before the parent is rewritten), restack of
-     deeper descendants onto those rewritten parents, rebase, merge,
-     cleanup and the move to `done`; never hand-roll any of it. Land does **not** auto-approve, and refuses if
+     `TASKS land <id>`, which owns the merge (a merge commit — it never
+     squashes or rewrites the task branch), retarget of immediate stacked
+     children to integration, cleanup and the move to `done`; never
+     hand-roll any of it. Stacked children need no rebase at any depth,
+     because the parent's commits stay in integration's history.
+     Land does **not** auto-approve, and refuses if
      the PR base is not the board integration branch. Run it from the
      primary clone or product dir — not from inside the task worktree it
      will remove. Idempotent if the PR is already merged; `TASKS cleanup

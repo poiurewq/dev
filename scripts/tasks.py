@@ -34,6 +34,10 @@ import time
 
 STATUSES = ["proposed", "backlog", "planned", "doing", "review", "done",
             "later", "not-planned"]
+# Live watch only. Static `TASKS board` / TASKS.md keep STATUSES (pipeline).
+_WATCH_HEAD = ("review", "doing", "planned", "proposed", "backlog")
+WATCH_STATUSES = [s for s in _WATCH_HEAD if s in STATUSES] + [
+    s for s in STATUSES if s not in _WATCH_HEAD]
 # Don't block an iteration close. later is parked (reseeds on iteration-new),
 # not finished — but close treats it like not-planned.
 TERMINAL = ("done", "later", "not-planned")
@@ -65,9 +69,10 @@ FIELDS = ["id", "title", "area", "status", "kind", "assignee", "branch", "deps",
 # Board push races on a shared integration branch: rebase onto origin and
 # retry this many times before queueing locally.
 PUSH_RETRIES = 5
-# Land: rebase+push+merge retries when GitHub reports not-mergeable / behind.
+# Land: merge retries when GitHub reports not-mergeable / recomputing.
+# Land never rewrites the task branch; a conflict is merged forward.
 LAND_RETRIES = 5
-# After push/rebase, GitHub often leaves mergeable=UNKNOWN while recomputing.
+# After a push, GitHub often leaves mergeable=UNKNOWN while recomputing.
 # Poll before gh pr merge so the first attempt is not a guaranteed failure.
 LAND_MERGEABLE_TIMEOUT_S = 30
 LAND_MERGEABLE_POLL_S = 1.0
@@ -230,7 +235,7 @@ def append_ignore_line(path, line):
 # Thin wrapper init writes. __TASKS_PY__ is replaced with repr(path).
 BOARD_VIEWER_SCRIPT = '''\
 #!/usr/bin/env python3
-"""Local board viewer (r/a/q; type id↵). Written by dev init; left alone if you edit it."""
+"""Local board viewer (r/a/q; arrows scroll; type id↵). Written by dev init; left alone if you edit it."""
 import os, sys
 TASKS = __TASKS_PY__
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -1293,12 +1298,24 @@ def ensure_local_branch(root, branch, start_ref=None):
         git("branch", branch, start, cwd=root)
 
 
+def rebase_in_progress(cwd):
+    """True if `cwd` has an unfinished rebase (merge or apply)."""
+    if not cwd:
+        return False
+    for name in ("rebase-merge", "rebase-apply"):
+        r = git("rev-parse", "--git-path", name, cwd=cwd, check=False)
+        path = (r.stdout or "").strip()
+        if r.returncode == 0 and path and os.path.isdir(path):
+            return True
+    return False
+
+
 def sync_task_branch_from_remote(root, branch):
     """Point local task branch at origin/<branch> when that ref exists.
 
-    Land and review-attach should start from the PR tip, not a stale local
-    ref. Refuses when local is strictly ahead of origin (would discard
-    unpushed commits via reset/--force branch move).
+    Restack and review-attach should start from the PR tip, not a stale
+    local ref. Refuses when local is strictly ahead of origin (would
+    discard unpushed commits via reset/--force branch move).
     """
     remote = f"origin/{branch}"
     if not ref_exists(root, remote):
@@ -1324,7 +1341,7 @@ def sync_task_branch_from_remote(root, branch):
 
 
 def _rebase_argv(upstream, old_base=None):
-    """git rebase args: exclude old_base commits when destacking a child."""
+    """git rebase args: exclude old_base commits when moving a stack child."""
     if old_base:
         return ["rebase", "--onto", upstream, old_base]
     return ["rebase", upstream]
@@ -1341,12 +1358,12 @@ def _rebase_in_existing_checkout(root, branch, upstream, checkout,
     before = git("rev-parse", branch, cwd=root).stdout.strip()
     r = git(*_rebase_argv(upstream, old_base), cwd=checkout, check=False)
     if r.returncode != 0:
-        git("rebase", "--abort", cwd=checkout, check=False)
         err = (r.stderr or r.stdout or "").strip()
         onto = f"{upstream} (excluding {old_base})" if old_base else upstream
+        git("rebase", "--abort", cwd=checkout, check=False)
         sys.exit(f"error: rebase of '{branch}' onto {onto} failed "
                  f"(conflicts?). Resolve in {checkout}, then re-run "
-                 f"land or restack.\n{err}")
+                 f"restack.\n{err}")
     after = git("rev-parse", branch, cwd=root).stdout.strip()
     return before != after
 
@@ -1359,7 +1376,7 @@ def _rebase_via_temp_worktree(root, branch, upstream, old_base=None):
     `git rebase <upstream> <branch>`, which would switch the primary checkout.
     """
     before = git("rev-parse", branch, cwd=root).stdout.strip()
-    tmp = tempfile.mkdtemp(prefix="dev-land-rebase-")
+    tmp = tempfile.mkdtemp(prefix="dev-restack-rebase-")
     try:
         r = git("worktree", "add", "--detach", tmp, branch, cwd=root,
                 check=False)
@@ -1369,12 +1386,12 @@ def _rebase_via_temp_worktree(root, branch, upstream, old_base=None):
                      f"'{branch}':\n{err}")
         r = git(*_rebase_argv(upstream, old_base), cwd=tmp, check=False)
         if r.returncode != 0:
-            git("rebase", "--abort", cwd=tmp, check=False)
             err = (r.stderr or r.stdout or "").strip()
             onto = f"{upstream} (excluding {old_base})" if old_base else upstream
+            git("rebase", "--abort", cwd=tmp, check=False)
             sys.exit(f"error: rebase of '{branch}' onto {onto} failed "
                      f"(conflicts?). Fetch/rebase the task branch, resolve, "
-                     f"push, then re-run land or restack.\n{err}")
+                     f"push, then re-run restack.\n{err}")
         new = git("rev-parse", "HEAD", cwd=tmp).stdout.strip()
         # Temp worktree still holds detached HEAD at `new`; drop it before
         # moving the branch ref (and before any other worktree reset).
@@ -1390,7 +1407,7 @@ def _rebase_via_temp_worktree(root, branch, upstream, old_base=None):
             if dirty:
                 sys.exit(f"error: rebased tip is {new[:12]} but worktree has "
                          f"uncommitted changes; commit/stash, reset to the "
-                         f"rebased tip, then re-run land or restack:\n"
+                         f"rebased tip, then re-run restack:\n"
                          f"{checkout}")
             git("reset", "--hard", new, cwd=checkout)
         else:
@@ -1407,17 +1424,18 @@ def _rebase_via_temp_worktree(root, branch, upstream, old_base=None):
 def rebase_task_onto_ref(root, branch, upstream, old_base=None):
     """Rebase task branch onto upstream ref. Returns True if rewritten.
 
-    Force-push is the caller's job when True. Conflicts abort and exit.
-    Rebases in the existing checkout if the branch is already checked out;
-    otherwise uses a temp worktree so the primary clone is never switched
-    onto the task branch solely for the rebase. Never rewrites integration.
+    Restack only — land never rewrites a task branch. Force-push is the
+    caller's job when True; conflicts abort and exit. Rebases in the
+    existing checkout if the branch is already checked out; otherwise uses
+    a temp worktree so the primary clone is never switched onto the task
+    branch solely for the rebase. Never rewrites integration.
 
     old_base, when set, is the tip to exclude (`git rebase --onto upstream
-    old_base`) so a squash-merged stack parent is not replayed. Do not skip
-    when old_base is not an ancestor: the parent may have moved ahead of
-    the child. Already-destacked is a no-op (`rebase --onto` reports up to
-    date). Do not use behind==0 for destack: a stacked child usually
-    already contains integration.
+    old_base`) when a rewritten stack parent must not be replayed. Do not
+    skip when old_base is not an ancestor: the parent may have moved ahead
+    of the child. An already-moved child is a no-op (`rebase --onto`
+    reports up to date), and behind==0 is not a valid skip there — a
+    stacked child usually already contains integration.
     """
     if not ref_exists(root, upstream):
         # Try origin/<name> if bare branch name given
@@ -1427,6 +1445,10 @@ def rebase_task_onto_ref(root, branch, upstream, old_base=None):
         elif not ref_exists(root, upstream):
             sys.exit(f"error: upstream '{upstream}' missing after fetch")
     old_base = resolve_rebase_exclude(root, old_base)
+    checkout = branch_checkout_cwd(root, branch)
+    if checkout and rebase_in_progress(checkout):
+        sys.exit(f"error: rebase of '{branch}' still in progress in "
+                 f"{checkout}; finish or abort it, then re-run restack")
     sync_task_branch_from_remote(root, branch)
     if not old_base:
         behind = git("rev-list", "--count", f"{branch}..{upstream}",
@@ -1437,12 +1459,12 @@ def rebase_task_onto_ref(root, branch, upstream, old_base=None):
     if checkout:
         return _rebase_in_existing_checkout(
             root, branch, upstream, checkout, old_base=old_base)
-    return _rebase_via_temp_worktree(
-        root, branch, upstream, old_base=old_base)
+    return _rebase_via_temp_worktree(root, branch, upstream,
+                                     old_base=old_base)
 
 
 def resolve_rebase_exclude(root, old_base):
-    """Resolve a destack exclude ref (SHA, branch, or origin/<branch>)."""
+    """Resolve a restack exclude ref (SHA, branch, or origin/<branch>)."""
     if not old_base:
         return None
     old_base = str(old_base).strip()
@@ -1453,7 +1475,7 @@ def resolve_rebase_exclude(root, old_base):
     if not old_base.startswith("origin/") and ref_exists(
             root, f"origin/{old_base}"):
         return git("rev-parse", f"origin/{old_base}", cwd=root).stdout.strip()
-    sys.exit(f"error: destack exclude '{old_base}' missing after fetch")
+    sys.exit(f"error: restack exclude '{old_base}' missing after fetch")
 
 
 def ref_short_name(ref):
@@ -1462,11 +1484,6 @@ def ref_short_name(ref):
     if ref.startswith("origin/"):
         return ref[len("origin/"):]
     return ref
-
-
-def rebase_task_onto_integration(root, branch, integration):
-    """Rebase task branch onto origin/<integration>. Returns True if rewritten."""
-    return rebase_task_onto_ref(root, branch, f"origin/{integration}")
 
 
 def open_prs_based_on(root, base_branch):
@@ -1500,213 +1517,88 @@ def open_prs_based_on(root, base_branch):
     return out
 
 
-def _fetch_origin_refs(root, names):
-    """Fetch several origin refs in a few calls (no per-ref round trip).
+def retarget_children(root, parent_branch, integration):
+    """Point PRs stacked on parent_branch at integration. Fail-closed.
 
-    If a batch fails (one missing ref fails the whole fetch), retry each
-    name so the others still update.
+    GitHub does not auto-retarget: deleting a branch that open PRs are
+    based on CLOSES them, even when its own PR merged. So this runs after
+    the merge and before cleanup deletes the branch. Only the PR base
+    moves — the parent's commits are already ancestors of integration
+    after a merge commit, so no child branch is rewritten at any depth.
     """
-    refs, seen = [], set()
-    for n in names:
-        n = (n or "").strip()
-        if n and n not in seen:
-            seen.add(n)
-            refs.append(n)
-    chunk = 50
-    for i in range(0, len(refs), chunk):
-        batch = refs[i:i + chunk]
-        r = git("fetch", "origin", *batch, cwd=root, check=False)
-        if r.returncode != 0 and len(batch) > 1:
-            for ref in batch:
-                git("fetch", "origin", ref, cwd=root, check=False)
-
-
-def resolve_branch_tip(root, name):
-    """SHA of origin/<name> or local name, or None."""
-    if not name:
-        return None
-    for cand in (f"origin/{name}", name):
-        if ref_exists(root, cand):
-            return git("rev-parse", cand, cwd=root).stdout.strip()
-    return None
-
-
-def collect_stack_on(root, parent_branch, integration):
-    """Immediate children of parent_branch plus deeper descendants.
-
-    Immediate: open PRs with GitHub base=parent, plus (retry after retarget)
-    open PRs based on integration whose head still has the parent tip as
-    ancestor — those heads are fetched first. Descendants: BFS via GitHub
-    base from those heads — not flattened onto integration.
-    """
-    git("fetch", "origin", parent_branch, cwd=root, check=False)
-    parent_sha = resolve_branch_tip(root, parent_branch)
-    immediate = {}
-    for pr in open_prs_based_on(root, parent_branch):
-        if pr["head"] != parent_branch:
-            immediate[pr["head"]] = pr
-    if parent_sha:
-        extra = []
-        for pr in open_prs_based_on(root, integration):
-            head = pr["head"]
-            if head in (parent_branch, integration) or head in immediate:
-                continue
-            extra.append(pr)
-        _fetch_origin_refs(root, [pr["head"] for pr in extra])
-        for pr in extra:
-            tip = resolve_branch_tip(root, pr["head"])
-            if tip and is_ancestor(root, parent_sha, tip):
-                immediate[pr["head"]] = pr
-    descendants = []
-    seen = {parent_branch, *immediate}
-    queue = list(immediate)
-    while queue:
-        b = queue.pop(0)
-        for pr in open_prs_based_on(root, b):
-            if pr["head"] in seen or pr["head"] == parent_branch:
-                continue
-            seen.add(pr["head"])
-            descendants.append(pr)
-            queue.append(pr["head"])
-    names = {parent_branch}
-    for pr in list(immediate.values()) + descendants:
-        names.add(pr["head"])
-        names.add(pr["base"])
-    _fetch_origin_refs(root, names)
-    tips = {}
-    for name in names:
-        tip = resolve_branch_tip(root, name)
-        if tip:
-            tips[name] = tip
-    if parent_branch in tips:
-        parent_sha = tips[parent_branch]
-    return {
-        "parent": parent_branch,
-        "parent_sha": parent_sha,
-        "immediate": list(immediate.values()),
-        "descendants": descendants,
-        "tips": tips,
-    }
-
-
-def destack_prepare(root, parent_branch, integration):
-    """Snapshot the stack; retarget immediate children to integration.
-
-    Call before the parent is rewritten or merged so auto-delete cannot
-    close them and retry can still see the parent tip they sit on.
-    Fail-closed: a retarget error does not rewrite or merge parent.
-    """
-    snap = collect_stack_on(root, parent_branch, integration)
-    for pr in snap["immediate"]:
-        if pr["base"] == integration:
-            continue
-        url, base = pr["url"], pr["base"]
-        print(f"  retarget {pr['head']} {base} → {integration} (before merge)")
-        r = gh("pr", "edit", url, "--base", integration, cwd=root, check=False)
-        if r.returncode != 0:
-            err = (r.stderr or r.stdout or "").strip()
-            sys.exit(f"error: destack: could not retarget {url} to "
-                     f"{integration}; not merging or deleting "
-                     f"'{parent_branch}'\n{err}")
-        pr["base"] = integration
-    return snap
-
-
-def _restore_destack_locals(root, branches, tips):
-    """Point destack-rewritten local refs back at snapshot tips."""
-    for branch in branches:
-        sha = (tips or {}).get(branch)
-        if not sha:
-            continue
-        print(f"  destack failed; restoring local '{branch}' to {sha[:12]}")
-        checkout = branch_checkout_cwd(root, branch)
-        if checkout:
-            dirty = git("status", "--porcelain", cwd=checkout,
-                        check=False).stdout.strip()
-            if dirty:
-                print(f"  destack failed; '{branch}' worktree dirty, "
-                      f"not restoring:\n{checkout}")
-                continue
-            git("reset", "--hard", sha, cwd=checkout, check=False)
-        elif ref_exists(root, f"refs/heads/{branch}"):
-            git("branch", "-f", branch, sha, cwd=root, check=False)
-
-
-def _restore_destack_origin(root, branches, tips):
-    """Force-push snapshot tips for destack heads already pushed."""
-    for branch in branches:
-        sha = (tips or {}).get(branch)
-        if not sha:
-            continue
-        print(f"  destack failed; restoring origin/{branch} to {sha[:12]}")
-        r = git("push", "--force-with-lease", "origin",
-                f"{sha}:refs/heads/{branch}", cwd=root, check=False)
-        if r.returncode != 0:
-            err = (r.stderr or r.stdout or "").strip()
-            print(f"  destack failed; could not restore origin/{branch}:"
-                  f"\n{err}")
-
-
-def destack_finish(root, integration, snap):
-    """Destack immediate children; restack deeper descendants.
-
-    Call while origin/<parent> is still the tip children sit on — before
-    land rebases or merges the parent. Immediate children rebase --onto
-    integration <parent-tip>. Deeper descendants rebase onto their
-    rewritten stack parent (exclude that parent's old tip). Does not
-    flatten the stack onto integration.
-    Rebases the whole snapshot, then pushes; on error, restores origin
-    (already-pushed heads) and local rewritten refs to the snapshot tips
-    so a re-run sees the original graph. Fail-closed: do not rewrite or
-    merge the parent on error.
-    """
-    parent_branch = snap["parent"]
-    parent_sha = snap["parent_sha"]
-    immediate = snap["immediate"]
-    descendants = snap["descendants"]
-    tips = snap["tips"]
-    if not immediate and not descendants:
+    children = open_prs_based_on(root, parent_branch)
+    if not children:
         return
-    if not parent_sha:
-        sys.exit(f"error: destack: parent '{parent_branch}' has no ref; "
-                 f"not rewriting or merging '{parent_branch}'")
-    r = git("fetch", "origin", integration, cwd=root, check=False)
-    if r.returncode != 0:
-        err = (r.stderr or r.stdout or "").strip()
-        sys.exit(f"error: destack: could not fetch origin/{integration}; "
-                 f"not rewriting or merging '{parent_branch}'\n{err}")
+    print(f"  retargeting {len(children)} stacked PR(s) to {integration}")
+    for pr in children:
+        url, head = pr["url"], pr["head"]
+        r = gh("pr", "edit", url, "--base", integration, cwd=root,
+               check=False)
+        if r.returncode != 0:
+            err = (r.stderr or r.stdout or "").strip()
+            sys.exit(f"error: could not retarget {url} ({head}) from "
+                     f"'{parent_branch}' to '{integration}'; not deleting "
+                     f"'{parent_branch}' (that would close this PR). "
+                     f"Retarget it, then re-run land.\n{err}")
+        print(f"  retarget {head}: {parent_branch} → {integration}")
+
+
+def merge_forward_task_branch(root, branch, integration):
+    """Merge origin/<integration> into the task branch, in place.
+
+    Absorbs a conflict without rewriting, so PRs stacked on this branch
+    stay valid. Only a clean merge is kept: a conflicted one is aborted
+    (atomic, unlike a half-applied rebase) and handed to the author, who
+    owns the branch and the context to resolve it. Returns False when the
+    branch already contains integration — then the CONFLICTING verdict is
+    not divergence and merging forward cannot fix it.
+    """
     up = f"origin/{integration}"
-    rewritten = []
-    pushed = []
+    git("fetch", "origin", integration, cwd=root, check=False)
+    git("fetch", "origin", branch, cwd=root, check=False)
+    if not ref_exists(root, up):
+        sys.exit(f"error: '{up}' missing after fetch; cannot merge forward")
+    # Merge forward from the reviewed tip, not a stale local ref (refuses
+    # if local is ahead, so unpushed work is never published by land).
+    sync_task_branch_from_remote(root, branch)
+    behind = git("rev-list", "--count", f"{branch}..{up}",
+                 cwd=root).stdout.strip()
+    if behind in ("", "0"):
+        return False
+    checkout = branch_checkout_cwd(root, branch)
+    tmp = None
+    if not checkout:
+        tmp = tempfile.mkdtemp(prefix="dev-land-merge-")
+        r = git("worktree", "add", tmp, branch, cwd=root, check=False)
+        if r.returncode != 0:
+            err = (r.stderr or r.stdout or "").strip()
+            shutil.rmtree(tmp, ignore_errors=True)
+            sys.exit(f"error: could not create temp worktree to merge "
+                     f"'{branch}' forward:\n{err}")
+        checkout = tmp
     try:
-        if immediate:
-            print(f"  destacking {len(immediate)} immediate PR(s) onto "
-                  f"{integration}")
-        for pr in immediate:
-            head = pr["head"]
-            print(f"  destack {head} onto {up} (excluding {parent_sha[:12]})")
-            if rebase_task_onto_ref(root, head, up, old_base=parent_sha):
-                rewritten.append(head)
-        if descendants:
-            print(f"  restacking {len(descendants)} descendant PR(s) onto "
-                  f"rewritten parents")
-        for pr in descendants:
-            head, base, url = pr["head"], pr["base"], pr["url"]
-            old_sha = tips.get(base)
-            if not old_sha:
-                sys.exit(f"error: destack: old base '{base}' of {url} has no "
-                         f"ref; not rewriting or merging '{parent_branch}'")
-            print(f"  restack {head} onto {base} (excluding {old_sha[:12]})")
-            if rebase_task_onto_ref(root, head, base, old_base=old_sha):
-                rewritten.append(head)
-        for pr in list(immediate) + list(descendants):
-            head = pr["head"]
-            push_task_branch(root, head, force=head in rewritten)
-            pushed.append(head)
-    except SystemExit:
-        _restore_destack_origin(root, pushed, tips)
-        _restore_destack_locals(root, rewritten, tips)
-        raise
+        dirty = git("status", "--porcelain", cwd=checkout,
+                    check=False).stdout.strip()
+        if dirty:
+            sys.exit(f"error: worktree for '{branch}' is dirty at "
+                     f"{checkout}; commit or stash, then re-run land")
+        r = git("merge", "--no-edit", up, cwd=checkout, check=False)
+        if r.returncode != 0:
+            git("merge", "--abort", cwd=checkout, check=False)
+            err = (r.stderr or r.stdout or "").strip()
+            sys.exit(f"error: '{branch}' conflicts with {up} and land does "
+                     f"not resolve conflicts or rewrite your branch.\n"
+                     f"Resolve on the branch (git merge {up} — merge, do "
+                     f"not rebase, or any PR stacked on it needs a "
+                     f"restack), push, then re-run land.\n{err}")
+        print(f"  merged {up} into {branch}; pushing")
+        push_task_branch(root, branch, force=False)
+        return True
+    finally:
+        if tmp:
+            git("worktree", "remove", "--force", tmp, cwd=root, check=False)
+            shutil.rmtree(tmp, ignore_errors=True)
+            git("worktree", "prune", cwd=root, check=False)
 
 
 def push_task_branch(root, branch, force=False):
@@ -1765,7 +1657,7 @@ def wait_for_pr_mergeable(root, pr, *, timeout_s=None, poll_s=None):
 
 
 def merge_error_transient(err):
-    """True only when a failed gh pr merge is worth rebase+retry.
+    """True only when a failed gh pr merge is worth another attempt.
 
     Permanent policy/review/auth failures return False so land fails fast.
     Default is permanent: only known "branch behind / conflict / flake"
@@ -1820,6 +1712,30 @@ def merge_error_transient(err):
         "try again",
     )
     return any(n in e for n in needles)
+
+
+def merge_error_wants_update(err):
+    """True when a failed gh pr merge asks for the branch to catch up.
+
+    Land does not rebase, so the only remedy for these is merging
+    origin/<integration> forward into the branch (what GitHub's "Update
+    branch" button does). Flake/status-check shapes are excluded — they
+    clear on their own and must not mutate the branch.
+    """
+    e = (err or "").lower()
+    return any(n in e for n in (
+        "head branch is out of date",
+        "base branch was modified",
+        "not mergeable",
+        "merge conflict",
+    ))
+
+
+def merge_commits_disallowed(err):
+    """True when gh pr merge failed because the repo forbids merge commits."""
+    e = (err or "").lower()
+    return ("merge commits are not allowed" in e
+            or ("merge commit" in e and "not allowed" in e))
 
 
 def merge_fail_permanent_message(err):
@@ -1945,7 +1861,9 @@ def cleanup_task_artifacts(root, scope, meta, branch=None, *, verbose=True):
     """Idempotent cleanup: clean worktrees; branches only after PR merge proof.
 
     Never deletes origin/<branch> or the local task branch unless the task's
-    PR is verified MERGED via gh. Dirty worktrees are left alone (no
+    PR is verified MERGED via gh. Retargets any PR still based on the
+    branch to integration first (deleting it would close them) and fails
+    closed if that retarget fails. Dirty worktrees are left alone (no
     --force wipe of uncommitted work). Safe to re-run; safe on open PRs.
     """
     tid = meta["id"]
@@ -1992,6 +1910,9 @@ def cleanup_task_artifacts(root, scope, meta, branch=None, *, verbose=True):
     if branch and drop_ok:
         if has_remote(root):
             git("fetch", "origin", "--prune", cwd=root, check=False)
+            # Deleting a branch open PRs are based on closes them, so the
+            # retarget lives with the delete, not only in land.
+            retarget_children(root, branch, integration_branch(root, scope))
             if ref_exists(root, f"origin/{branch}"):
                 r = git("push", "origin", "--delete", branch, cwd=root,
                         check=False)
@@ -2015,8 +1936,9 @@ def cleanup_task_artifacts(root, scope, meta, branch=None, *, verbose=True):
             actions.append(f"local branch '{branch}' still checked out at "
                            f"{still}; not deleted")
         elif ref_exists(root, f"refs/heads/{branch}"):
-            # Squash merges do not make the branch an ancestor of main, so -D
-            # is required — only reached when PR is verified MERGED.
+            # -D, not -d: the branch may have been merged into integration
+            # rather than the current HEAD — only reached when PR is
+            # verified MERGED.
             r = git("branch", "-D", branch, cwd=root, check=False)
             if r.returncode == 0:
                 actions.append(f"deleted local branch {branch}")
@@ -2061,18 +1983,18 @@ def note_version_intent(intent, integration, product):
 
 
 def cmd_land(args):
-    """Post-approval land: destack children, rebase if needed, merge, cleanup.
+    """Post-approval land: merge, retarget children, cleanup.
 
     Merge is integrator-only (whoami == board integrator). Already-merged
     and already-done paths are cleanup and stay allowed for anyone so
     board/status/review refresh can mark done.
-    Destacks first, while origin/<parent> is still the tip children sit on:
-    retarget immediate children to integration, destack them onto
-    integration (child-unique), restack deeper descendants onto the
-    rewritten parents — does not flatten the stack. Then rebases and
-    merges the parent and deletes the parent branch. Already-merged destacks
-    (no-op when children are already destacked). Already-done is cleanup
-    only.
+    Merges with a merge commit and never rewrites the task branch: the
+    branch's commits become ancestors of integration, so PRs stacked on
+    it need no rebase at any depth. Divergence is absorbed by the merge;
+    a real conflict is merged forward into the branch (clean only) or
+    handed back to the author. Immediate children are retargeted to
+    integration after the merge and before cleanup deletes the branch —
+    deleting it first would close them. Already-done is cleanup only.
     Does not approve the PR. Surfaces Version intent from the PR body only —
     product version file edits stay with the merger / product docs.
     """
@@ -2110,9 +2032,8 @@ def cmd_land(args):
     print(f"  Version intent: {intent if intent is not None else '(not stated)'}")
 
     if pr_is_merged(info):
-        print(f"T{tid}: PR already merged — marking done and cleaning up")
-        snap = destack_prepare(root, branch, integration)
-        destack_finish(root, integration, snap)
+        print(f"T{tid}: PR already merged — retargeting children, then done")
+        retarget_children(root, branch, integration)
         mark_task_done(root, scope, integration, bw, meta)
         # Re-read meta so status=done is visible; cleanup still keys off PR.
         meta = find_task(bw, scope, tid)
@@ -2144,40 +2065,39 @@ def cmd_land(args):
 
     git("fetch", "origin", integration, cwd=root, check=False)
     git("fetch", "origin", branch, cwd=root, check=False)
-    # Destack while origin/<parent> is still the tip children sit on.
-    # Then rebase/merge the parent. A re-run can rediscover via ancestry.
-    snap = destack_prepare(root, branch, integration)
-    destack_finish(root, integration, snap)
-
-    rewritten = rebase_task_onto_integration(root, branch, integration)
-    if rewritten:
-        print(f"  rebased {branch} onto origin/{integration}; pushing")
-        push_task_branch(root, branch, force=True)
-    else:
-        push_task_branch(root, branch, force=False)
-
-    last_err = ""
+    # Land never pushes the task branch: it merges what was reviewed.
     merged = False
+    last_err = ""
     for attempt in range(1, LAND_RETRIES + 1):
-        # After push, mergeable is often UNKNOWN; wait rather than fail once.
+        # Right after a push, mergeable is often UNKNOWN; wait rather than
+        # fail once. A merge commit absorbs a behind-but-clean branch, so
+        # only a real content conflict reports CONFLICTING.
         readiness = wait_for_pr_mergeable(root, pr)
         if readiness == "MERGED":
             merged = True
             print(f"  PR became merged while waiting (attempt {attempt})")
             break
         if readiness == "CONFLICTING":
-            last_err = (f"PR mergeable=CONFLICTING after wait "
-                        f"(attempt {attempt})")
-            print(f"  {last_err}; rebase and retry…")
-            git("fetch", "origin", integration, cwd=root, check=False)
-            rewritten = rebase_task_onto_integration(root, branch, integration)
-            push_task_branch(root, branch, force=True if rewritten else False)
+            print(f"  PR mergeable=CONFLICTING (attempt {attempt}); "
+                  f"merging origin/{integration} forward…")
+            if merge_forward_task_branch(root, branch, integration):
+                last_err = (f"PR mergeable=CONFLICTING after merging "
+                            f"origin/{integration} forward (attempt "
+                            f"{attempt})")
+            else:
+                last_err = (f"PR mergeable=CONFLICTING but '{branch}' "
+                            f"already contains origin/{integration}; "
+                            f"GitHub may still be recomputing (attempt "
+                            f"{attempt})")
+                print(f"  already contains origin/{integration}; waiting")
             if attempt < LAND_RETRIES:
                 time.sleep(min(2 * attempt, 8))
             continue
 
-        # Squash only; cleanup handles branch/worktree deletion explicitly.
-        r = gh("pr", "merge", pr, "--squash", cwd=root, check=False)
+        # Merge commit, never squash: the branch's commits must stay in
+        # integration's history so stacked children need no rewrite.
+        # cleanup handles branch/worktree deletion explicitly.
+        r = gh("pr", "merge", pr, "--merge", cwd=root, check=False)
         out = ((r.stdout or "") + (r.stderr or "")).strip()
         if r.returncode == 0:
             merged = True
@@ -2189,6 +2109,13 @@ def cmd_land(args):
             merged = True
             print(f"  already merged (attempt {attempt})")
             break
+        if merge_commits_disallowed(out):
+            sys.exit(
+                f"error: this repository does not allow merge commits, which "
+                f"land requires — squashing would rewrite '{branch}' and "
+                f"strand any PR stacked on it.\nEnable 'Allow merge commits' "
+                f"in the repository's settings (Settings → General → Pull "
+                f"Requests), then re-run land.\n{out}")
         info = pr_view(root, pr)
         if pr_is_merged(info):
             merged = True
@@ -2196,16 +2123,22 @@ def cmd_land(args):
             break
         if not merge_error_transient(out):
             sys.exit(merge_fail_permanent_message(out))
-        print(f"  merge attempt {attempt} failed (transient); rebase and retry…")
+        print(f"  merge attempt {attempt} failed (transient); retry…")
         git("fetch", "origin", integration, cwd=root, check=False)
-        rewritten = rebase_task_onto_integration(root, branch, integration)
-        push_task_branch(root, branch, force=True if rewritten else False)
+        # A stale branch cannot fix itself by waiting: land never rebases,
+        # so merge integration forward (no-op if already contained).
+        if merge_error_wants_update(out):
+            merge_forward_task_branch(root, branch, integration)
         if attempt < LAND_RETRIES:
             time.sleep(min(2 * attempt, 8))
 
     if not merged:
         sys.exit(f"error: could not merge T{tid} PR after {LAND_RETRIES} "
                  f"attempts:\n{last_err}")
+
+    # Before cleanup: deleting this branch while a PR is based on it closes
+    # that PR (GitHub does not auto-retarget). Fail-closed.
+    retarget_children(root, branch, integration)
 
     integration, bw = resolve_board(root, scope)
     mark_task_done(root, scope, integration, bw, meta)
@@ -2768,8 +2701,8 @@ def cmd_restack(args):
     base (land-safe default); --onto / --retarget still force retarget.
     --onto rebases every target onto that ref (does not cascade children
     onto restacked parents); omit it to preserve in-set stack parents.
-    Destacking onto a different ref uses `rebase --onto` excluding the old
-    PR base tip so a squash-merged parent is not replayed.
+    Moving onto a different ref uses `rebase --onto` excluding the old PR
+    base tip so a rewritten parent's commits are not replayed.
     """
     root, scope, integration, bw = ctx()
     ids = parse_id_list(args.ids or "")
@@ -3476,7 +3409,7 @@ def cmd_init(args):
     if os.path.isdir(dest):
         print(f"viewer: skipped ({VIEWER_NAME} is a directory)")
     else:
-        print(f"viewer: ./{VIEWER_NAME}  (r refresh, a by area, q quit, type id↵)")
+        print(f"viewer: ./{VIEWER_NAME}  (r refresh, a by area, q quit, arrows scroll, type id↵)")
     print(f"identity: {args.name}")
     if scope != ".":
         print(f"note: commands target this board from inside '{scope}/' "
@@ -3860,18 +3793,21 @@ def _index_block(rows):
     return lines
 
 
-def _list_block(visible, tasks, expand=False, color=False):
+def _list_block(visible, tasks, expand=False, color=False, status_order=None):
     """In-play tasks one per line; --expand includes done/later/not-planned."""
-    rank = {s: i for i, s in enumerate(STATUSES)}
+    order = status_order or STATUSES
+    rank = {s: i for i, s in enumerate(order)}
     listed = [t for t in visible if expand or t["status"] not in TERMINAL]
     listed.sort(key=lambda t: (rank.get(t["status"], 99), t["id"]))
     return [fmt_line(t, tasks, color=color) for t in listed]
 
 
-def _board_by_status(tasks, covered, expand=False, color=False):
+def _board_by_status(tasks, covered, expand=False, color=False,
+                     status_order=None):
     visible = [t for t in tasks if t["id"] not in covered]
+    order = status_order or STATUSES
     rows = []
-    for status in STATUSES:
+    for status in order:
         col = [t for t in visible if t["status"] == status]
         if not col:
             continue
@@ -3880,14 +3816,16 @@ def _board_by_status(tasks, covered, expand=False, color=False):
         sgr = _STATUS_COLOR.get(status) if color else None
         rows.append((_status_label(status), rhs, sgr))
     lines = _index_block(rows)
-    listed = _list_block(visible, tasks, expand=expand, color=color)
+    listed = _list_block(visible, tasks, expand=expand, color=color,
+                         status_order=order)
     if listed:
         lines.append("")
         lines.extend(listed)
     return lines
 
 
-def _board_by_area(bw, scope, tasks, covered, expand=False, color=False):
+def _board_by_area(bw, scope, tasks, covered, expand=False, color=False,
+                   status_order=None):
     """Group visible tasks by area. Multi-area tasks appear under each area.
 
     Index order: areas.md order, then other named areas (sorted), then
@@ -3930,14 +3868,16 @@ def _board_by_area(bw, scope, tasks, covered, expand=False, color=False):
                 sgr = _STATUS_COLOR.get(status) if color else None
                 rows.append((_status_label(status), _fmt_count(col), sgr))
     lines = _index_block(rows)
-    listed = _list_block(visible, tasks, expand=expand, color=color)
+    listed = _list_block(visible, tasks, expand=expand, color=color,
+                         status_order=status_order)
     if listed:
         lines.append("")
         lines.extend(listed)
     return lines
 
 
-def _board_text(cfg, scope, bw, tasks, expand=False, by_area=False, color=False):
+def _board_text(cfg, scope, bw, tasks, expand=False, by_area=False, color=False,
+                status_order=None):
     covered = set() if expand else covered_by_umbrellas(tasks)
     title = f"# Board — iteration {iteration_label(cfg)}"
     if scope != ".":
@@ -3947,10 +3887,12 @@ def _board_text(cfg, scope, bw, tasks, expand=False, by_area=False, color=False)
     lines = [title, ""]
     if by_area:
         lines.extend(_board_by_area(
-            bw, scope, tasks, covered, expand=expand, color=color))
+            bw, scope, tasks, covered, expand=expand, color=color,
+            status_order=status_order))
     else:
         lines.extend(_board_by_status(
-            tasks, covered, expand=expand, color=color))
+            tasks, covered, expand=expand, color=color,
+            status_order=status_order))
     return "\n".join(lines)
 
 
@@ -3958,25 +3900,39 @@ def _render_board(args):
     """Fetch, write plain TASKS.md, return (plain, display, tasks).
 
     display is colorized when stdout is a color-capable tty. TASKS.md is
-    always the plain text.
+    always the plain text in STATUSES order. Watch display uses
+    WATCH_STATUSES so hottest work sits above the fold.
     """
     root, scope, branch, bw = ctx()
     cfg = read_board_cfg(bw, scope)
     tasks = all_tasks(bw, scope)
     expand = bool(getattr(args, "expand", False))
     by_area = bool(getattr(args, "by_area", False))
+    watch = bool(getattr(args, "watch", False))
     plain = _board_text(cfg, scope, bw, tasks, expand=expand, by_area=by_area)
     with open(os.path.join(root, scope, "TASKS.md"), "w") as f:
         f.write(plain)
-    display = (_board_text(cfg, scope, bw, tasks, expand=expand,
-                           by_area=by_area, color=True)
-               if _use_color() else plain)
+    live_order = WATCH_STATUSES if watch else None
+    if live_order or _use_color():
+        display = _board_text(cfg, scope, bw, tasks, expand=expand,
+                              by_area=by_area, color=_use_color(),
+                              status_order=live_order)
+    else:
+        display = plain
     return plain.rstrip(), display.rstrip(), tasks
 
 
 def _clear_screen():
     sys.stdout.write("\033[2J\033[H")
     sys.stdout.flush()
+
+
+# CSI / SS3 sequences `_read_tty_byte` may return whole. Only up/down
+# scroll; anything else stays ESC so it never leaks as a/A/q.
+_KEY_SEQS = {
+    "\x1b[A": "up", "\x1b[B": "down",
+    "\x1bOA": "up", "\x1bOB": "down",
+}
 
 
 def _read_key(cooked=True):
@@ -4010,6 +3966,10 @@ def _read_key(cooked=True):
         ch = _read_tty_byte(fd)
     if not ch:
         return "q"
+    if ch == b"\x1b":
+        return "\x1b"
+    if ch.startswith(b"\x1b"):
+        return _KEY_SEQS.get(ch.decode("ascii", "replace"), "\x1b")
     key = ch.decode("utf-8", "replace")
     if key == "\x04":  # Ctrl-D
         return "q"
@@ -4020,12 +3980,12 @@ _tty_unread = None  # one leftover byte after a lone ESC (not a CSI)
 
 
 def _read_tty_byte(fd):
-    """One byte. ESC consumes a queued CSI/SS3 so arrows do not leak.
+    """One keystroke as bytes. ESC consumes a queued CSI/SS3.
 
-    Arrow keys arrive as one burst (ESC [ A). A lone Escape has nothing
-    waiting. Do not time-drain the buffer: that eats the next typed digit.
-    A short poll lets a CSI split across an SSH packet still attach; a
-    non-CSI byte after ESC is unread for the next call.
+    Lone Escape is b'\\x1b'. A CSI/SS3 is the full sequence so callers can
+    map arrows. Do not time-drain the buffer: that eats the next typed
+    digit. A short poll lets a CSI split across an SSH packet still attach;
+    a non-CSI byte after ESC is unread for the next call.
     """
     global _tty_unread
     if _tty_unread is not None:
@@ -4042,28 +4002,129 @@ def _read_tty_byte(fd):
     if nxt not in (b"[", b"O"):
         _tty_unread = nxt
         return ch
+    seq = ch + nxt
     # CSI / SS3: optional parameter bytes, then a final byte in 0x40–0x7E.
     while True:
         if not select.select([fd], [], [], 0.025)[0]:
             break
         extra = os.read(fd, 1)
-        if not extra or (0x40 <= extra[0] <= 0x7E):
+        if not extra:
             break
-    return ch
+        seq += extra
+        if 0x40 <= extra[0] <= 0x7E:
+            break
+    return seq
 
 
-def _paint_watch(out, by_area, buf, result):
-    _clear_screen()
-    print(out)
-    print()
+_ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+
+
+def _visible_len(s):
+    return len(_ANSI_RE.sub("", s or ""))
+
+
+def _term_size():
+    sz = shutil.get_terminal_size(fallback=(80, 24))
+    return max(1, sz.lines), max(1, sz.columns)
+
+
+def _line_rows(s, cols):
+    n = _visible_len(s)
+    if cols <= 0:
+        return 1
+    return max(1, (n + cols - 1) // cols) if n else 1
+
+
+def _rows_of(lines, cols):
+    return sum(_line_rows(ln, cols) for ln in lines)
+
+
+def _watch_help(by_area, more_above=0, more_below=0):
     other = "by status" if by_area else "by area"
-    help_line = f"r refresh  a {other}  q quit  · type id↵"
-    print(_ansi(_DIM, help_line) if _use_color() else help_line)
+    help_line = f"r refresh  a {other}  q quit  · type id↵  arrows scroll"
+    if more_above or more_below:
+        bits = []
+        if more_above:
+            bits.append(f"↑{more_above}")
+        if more_below:
+            bits.append(f"↓{more_below}")
+        help_line += "  · " + " ".join(bits)
+    return help_line
+
+
+def _watch_footer_lines(by_area, buf, result, more_above=0, more_below=0):
+    help_line = _watch_help(by_area, more_above, more_below)
+    if _use_color():
+        help_line = _ansi(_DIM, help_line)
+    lines = ["", help_line]
     if buf:
-        print(f"> {buf}")
+        lines.append(f"> {buf}")
     if result:
-        print(result)
+        lines.append(result)
+    return lines
+
+
+def _max_watch_offset(body, body_rows, cols):
+    """Largest logical start that still fills `body_rows` from the bottom."""
+    if not body:
+        return 0
+    used = 0
+    i = len(body)
+    while i > 0:
+        need = _line_rows(body[i - 1], cols)
+        if used + need > body_rows and used > 0:
+            break
+        i -= 1
+        used += need
+    return i
+
+
+def _window_lines(lines, offset, rows, cols):
+    """Logical slice of `lines` starting at `offset` that fits `rows`."""
+    if not lines or rows <= 0:
+        return [], 0, 0
+    offset = max(0, min(offset, _max_watch_offset(lines, rows, cols)))
+    shown = []
+    used = 0
+    i = offset
+    while i < len(lines):
+        need = _line_rows(lines[i], cols)
+        if shown and used + need > rows:
+            break
+        shown.append(lines[i])
+        used += need
+        i += 1
+        if used >= rows:
+            break
+    return shown, offset, len(lines) - i
+
+
+def _paint_watch(out, by_area, buf, result, offset):
+    """Paint a terminal-height viewport. Returns the clamped offset."""
+    rows, cols = _term_size()
+    body = (out or "").splitlines()
+    # First pass: footer without counts, so the body budget is stable.
+    footer_rows = _rows_of(_watch_footer_lines(by_area, buf, result), cols)
+    body_rows = max(1, rows - footer_rows)
+    shown, offset, more_below = _window_lines(body, offset, body_rows, cols)
+    more_above = offset
+    if more_above or more_below:
+        # Counts on the help line can wrap an extra row; re-fit if so.
+        footer_rows = _rows_of(
+            _watch_footer_lines(by_area, buf, result, more_above, more_below),
+            cols)
+        body_rows = max(1, rows - footer_rows)
+        shown, offset, more_below = _window_lines(
+            body, offset, body_rows, cols)
+        more_above = offset
+    footer = _watch_footer_lines(by_area, buf, result, more_above, more_below)
+    _clear_screen()
+    # No trailing newline: print() on the last row scrolls the first line off.
+    frame = shown + footer
+    if frame:
+        sys.stdout.write("\n".join(frame))
     sys.stdout.flush()
+    return offset
 
 
 def cmd_board(args):
@@ -4085,6 +4146,7 @@ def cmd_board(args):
         buf = ""
         result = ""
         last_tid = None
+        offset = 0
         try:
             while True:
                 by_area = bool(getattr(args, "by_area", False))
@@ -4093,17 +4155,27 @@ def cmd_board(args):
                     result = watch_collision_line(
                         last_tid, tasks, color=_use_color())
                 while True:
-                    _paint_watch(display, by_area, buf, result)
+                    offset = _paint_watch(
+                        display, by_area, buf, result, offset)
                     key = _read_key(cooked=old_term is None)
                     if key in ("q", "Q"):
+                        print()
                         return
                     if key in ("r", "R"):
                         buf = ""
+                        offset = 0
                         break
                     if key in ("a", "A"):
                         buf = ""
+                        offset = 0
                         args.by_area = not by_area
                         break
+                    if key == "down":
+                        offset += 1
+                        continue
+                    if key == "up":
+                        offset = max(0, offset - 1)
+                        continue
                     if key == "\x1b":
                         buf = ""
                         result = ""
@@ -4552,8 +4624,8 @@ def main():
                         "listed under each area)")
     s.add_argument("--watch", action="store_true",
                    help="interactive: r refresh, a toggle by-area, "
-                        "q quit, type id+Enter for area collisions "
-                        "(used by ./board)")
+                        "q quit, arrows scroll, type id+Enter for area "
+                        "collisions (used by ./board)")
     s.set_defaults(fn=cmd_board)
 
     s = sub.add_parser("iteration", help="show current iteration")
@@ -4660,7 +4732,7 @@ def main():
     s.set_defaults(fn=cmd_preflight)
 
     s = sub.add_parser("land",
-                       help="integrator-only: merge task PR (squash), cleanup, mark done")
+                       help="integrator-only: merge task PR (merge commit), cleanup, mark done")
     s.add_argument("id", type=int)
     s.set_defaults(fn=cmd_land)
 

@@ -77,4 +77,6 @@ Run the steps below **before claiming anything**, then run
    needs unmerged code from an earlier one, stack on that task's branch
    (`TASKS ship --base <parent-branch> --batch … --shipped …`) and note the
    dependency in
-   the PR body.
+   the PR body. Stacking is cheap: `land` merges the parent without
+   rewriting it, so a stacked child is only retargeted, never rebased —
+   at any depth.
