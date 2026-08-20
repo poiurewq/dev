@@ -235,7 +235,7 @@ def append_ignore_line(path, line):
 # Thin wrapper init writes. __TASKS_PY__ is replaced with repr(path).
 BOARD_VIEWER_SCRIPT = '''\
 #!/usr/bin/env python3
-"""Local board viewer (r/a/q; arrows scroll; type id↵). Written by dev init; left alone if you edit it."""
+"""Local board viewer (r/a/e/q; arrows scroll; type id↵). Written by dev init; left alone if you edit it."""
 import os, sys
 TASKS = __TASKS_PY__
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -716,20 +716,6 @@ def membership_leaves(umbrella, by_id, _seen=None):
         else:
             leaves.append(child)
     return leaves
-
-
-def covered_by_umbrellas(tasks):
-    """Task ids that sit under any umbrella (direct or nested membership)."""
-    by_id = {t["id"]: t for t in tasks}
-    covered = set()
-    for t in tasks:
-        if not is_umbrella(t):
-            continue
-        for d in t.get("deps", []):
-            covered.add(d)
-        for leaf in membership_leaves(t, by_id):
-            covered.add(leaf["id"])
-    return covered
 
 
 def umbrella_rollup(umbrella, tasks):
@@ -3409,7 +3395,7 @@ def cmd_init(args):
     if os.path.isdir(dest):
         print(f"viewer: skipped ({VIEWER_NAME} is a directory)")
     else:
-        print(f"viewer: ./{VIEWER_NAME}  (r refresh, a by area, q quit, arrows scroll, type id↵)")
+        print(f"viewer: ./{VIEWER_NAME}  (r refresh, a by area, e expand, q quit, arrows scroll, type id↵)")
     print(f"identity: {args.name}")
     if scope != ".":
         print(f"note: commands target this board from inside '{scope}/' "
@@ -3793,22 +3779,58 @@ def _index_block(rows):
     return lines
 
 
-def _list_block(visible, tasks, expand=False, color=False, status_order=None):
-    """In-play tasks one per line; --expand includes done/later/not-planned."""
+def _list_block(tasks, expand=False, color=False, status_order=None):
+    """In-play tasks one per line, umbrella children indented under the parent.
+
+    --expand also lists done/later/not-planned. A child whose umbrella is
+    itself unlisted renders at top level, so nothing drops off the board.
+    """
     order = status_order or STATUSES
     rank = {s: i for i, s in enumerate(order)}
-    listed = [t for t in visible if expand or t["status"] not in TERMINAL]
-    listed.sort(key=lambda t: (rank.get(t["status"], 99), t["id"]))
-    return [fmt_line(t, tasks, color=color) for t in listed]
+    listed = [t for t in tasks if expand or t["status"] not in TERMINAL]
+    by_id = {t["id"]: t for t in listed}
+    parent = {}  # child id -> umbrella id; first umbrella by id wins
+
+    def has_ancestor(node, target):
+        seen, cur = set(), parent.get(node)
+        while cur is not None and cur not in seen:
+            if cur == target:
+                return True
+            seen.add(cur)
+            cur = parent.get(cur)
+        return False
+
+    for t in sorted(listed, key=lambda t: t["id"]):
+        if not is_umbrella(t):
+            continue
+        for d in t["deps"]:
+            if (d in by_id and d not in parent and d != t["id"]
+                    and not has_ancestor(t["id"], d)):
+                parent[d] = t["id"]
+    children = {}
+    for cid, pid in parent.items():
+        children.setdefault(pid, []).append(cid)
+
+    def in_order(col):
+        return sorted(col, key=lambda t: (rank.get(t["status"], 99), t["id"]))
+
+    lines = []
+
+    def emit(t, depth):
+        lines.append("  " * depth + fmt_line(t, tasks, color=color))
+        for kid in in_order([by_id[c] for c in children.get(t["id"], [])]):
+            emit(kid, depth + 1)
+
+    for t in in_order([t for t in listed if t["id"] not in parent]):
+        emit(t, 0)
+    return lines
 
 
-def _board_by_status(tasks, covered, expand=False, color=False,
-                     status_order=None):
-    visible = [t for t in tasks if t["id"] not in covered]
+def _board_by_status(tasks, expand=False, color=False, status_order=None):
     order = status_order or STATUSES
     rows = []
     for status in order:
-        col = [t for t in visible if t["status"] == status]
+        col = [t for t in tasks if t["status"] == status]
         if not col:
             continue
         fold = status in TERMINAL and not expand
@@ -3816,7 +3838,7 @@ def _board_by_status(tasks, covered, expand=False, color=False,
         sgr = _STATUS_COLOR.get(status) if color else None
         rows.append((_status_label(status), rhs, sgr))
     lines = _index_block(rows)
-    listed = _list_block(visible, tasks, expand=expand, color=color,
+    listed = _list_block(tasks, expand=expand, color=color,
                          status_order=order)
     if listed:
         lines.append("")
@@ -3824,9 +3846,9 @@ def _board_by_status(tasks, covered, expand=False, color=False,
     return lines
 
 
-def _board_by_area(bw, scope, tasks, covered, expand=False, color=False,
+def _board_by_area(bw, scope, tasks, expand=False, color=False,
                    status_order=None):
-    """Group visible tasks by area. Multi-area tasks appear under each area.
+    """Group tasks by area. Multi-area tasks appear under each area.
 
     Index order: areas.md order, then other named areas (sorted), then
     reserved `all`, then untagged. Empty named areas from areas.md are kept
@@ -3834,9 +3856,8 @@ def _board_by_area(bw, scope, tasks, covered, expand=False, color=False,
     Default keeps done/later/not-planned off area lines (own count rows)
     so open work stays scannable; --expand puts those ids on area lines too.
     """
-    visible = [t for t in tasks if t["id"] not in covered]
-    indexed = visible if expand else [
-        t for t in visible if t["status"] not in TERMINAL]
+    indexed = tasks if expand else [
+        t for t in tasks if t["status"] not in TERMINAL]
     known = list(read_areas(bw, scope).keys())  # insertion order
     buckets = {name: [] for name in known}
     ad_hoc = {}  # area -> [tasks], excluding known and reserved
@@ -3863,12 +3884,12 @@ def _board_by_area(bw, scope, tasks, covered, expand=False, color=False,
         rows.append(("(untagged)", _fmt_ids(untagged, color=color)))
     if not expand:
         for status in TERMINAL:
-            col = [t for t in visible if t["status"] == status]
+            col = [t for t in tasks if t["status"] == status]
             if col:
                 sgr = _STATUS_COLOR.get(status) if color else None
                 rows.append((_status_label(status), _fmt_count(col), sgr))
     lines = _index_block(rows)
-    listed = _list_block(visible, tasks, expand=expand, color=color,
+    listed = _list_block(tasks, expand=expand, color=color,
                          status_order=status_order)
     if listed:
         lines.append("")
@@ -3878,7 +3899,6 @@ def _board_by_area(bw, scope, tasks, covered, expand=False, color=False,
 
 def _board_text(cfg, scope, bw, tasks, expand=False, by_area=False, color=False,
                 status_order=None):
-    covered = set() if expand else covered_by_umbrellas(tasks)
     title = f"# Board — iteration {iteration_label(cfg)}"
     if scope != ".":
         title += f" ({scope})"
@@ -3887,11 +3907,11 @@ def _board_text(cfg, scope, bw, tasks, expand=False, by_area=False, color=False,
     lines = [title, ""]
     if by_area:
         lines.extend(_board_by_area(
-            bw, scope, tasks, covered, expand=expand, color=color,
+            bw, scope, tasks, expand=expand, color=color,
             status_order=status_order))
     else:
         lines.extend(_board_by_status(
-            tasks, covered, expand=expand, color=color,
+            tasks, expand=expand, color=color,
             status_order=status_order))
     return "\n".join(lines)
 
@@ -4039,9 +4059,11 @@ def _rows_of(lines, cols):
     return sum(_line_rows(ln, cols) for ln in lines)
 
 
-def _watch_help(by_area, more_above=0, more_below=0):
+def _watch_help(by_area, expand, more_above=0, more_below=0):
     other = "by status" if by_area else "by area"
-    help_line = f"r refresh  a {other}  q quit  · type id↵  arrows scroll"
+    fold = "collapse" if expand else "expand"
+    help_line = (f"r refresh  a {other}  e {fold}  q quit"
+                 "  · type id↵  arrows scroll")
     if more_above or more_below:
         bits = []
         if more_above:
@@ -4052,8 +4074,9 @@ def _watch_help(by_area, more_above=0, more_below=0):
     return help_line
 
 
-def _watch_footer_lines(by_area, buf, result, more_above=0, more_below=0):
-    help_line = _watch_help(by_area, more_above, more_below)
+def _watch_footer_lines(by_area, expand, buf, result,
+                        more_above=0, more_below=0):
+    help_line = _watch_help(by_area, expand, more_above, more_below)
     if _use_color():
         help_line = _ansi(_DIM, help_line)
     lines = ["", help_line]
@@ -4099,25 +4122,28 @@ def _window_lines(lines, offset, rows, cols):
     return shown, offset, len(lines) - i
 
 
-def _paint_watch(out, by_area, buf, result, offset):
+def _paint_watch(out, by_area, expand, buf, result, offset):
     """Paint a terminal-height viewport. Returns the clamped offset."""
     rows, cols = _term_size()
     body = (out or "").splitlines()
     # First pass: footer without counts, so the body budget is stable.
-    footer_rows = _rows_of(_watch_footer_lines(by_area, buf, result), cols)
+    footer_rows = _rows_of(
+        _watch_footer_lines(by_area, expand, buf, result), cols)
     body_rows = max(1, rows - footer_rows)
     shown, offset, more_below = _window_lines(body, offset, body_rows, cols)
     more_above = offset
     if more_above or more_below:
         # Counts on the help line can wrap an extra row; re-fit if so.
         footer_rows = _rows_of(
-            _watch_footer_lines(by_area, buf, result, more_above, more_below),
+            _watch_footer_lines(by_area, expand, buf, result,
+                                more_above, more_below),
             cols)
         body_rows = max(1, rows - footer_rows)
         shown, offset, more_below = _window_lines(
             body, offset, body_rows, cols)
         more_above = offset
-    footer = _watch_footer_lines(by_area, buf, result, more_above, more_below)
+    footer = _watch_footer_lines(by_area, expand, buf, result,
+                                 more_above, more_below)
     _clear_screen()
     # No trailing newline: print() on the last row scrolls the first line off.
     frame = shown + footer
@@ -4150,13 +4176,14 @@ def cmd_board(args):
         try:
             while True:
                 by_area = bool(getattr(args, "by_area", False))
+                expand = bool(getattr(args, "expand", False))
                 _plain, display, tasks = _render_board(args)
                 if last_tid is not None:
                     result = watch_collision_line(
                         last_tid, tasks, color=_use_color())
                 while True:
                     offset = _paint_watch(
-                        display, by_area, buf, result, offset)
+                        display, by_area, expand, buf, result, offset)
                     key = _read_key(cooked=old_term is None)
                     if key in ("q", "Q"):
                         print()
@@ -4169,6 +4196,11 @@ def cmd_board(args):
                         buf = ""
                         offset = 0
                         args.by_area = not by_area
+                        break
+                    if key in ("e", "E"):
+                        buf = ""
+                        offset = 0
+                        args.expand = not expand
                         break
                     if key == "down":
                         offset += 1
@@ -4617,15 +4649,15 @@ def main():
 
     s = sub.add_parser("board", help="print board view; regenerate TASKS.md")
     s.add_argument("--expand", action="store_true",
-                   help="list umbrella children and done/later/not-planned "
-                        "(default folds both)")
+                   help="also list done/later/not-planned (default folds "
+                        "them to counts)")
     s.add_argument("--by-area", action="store_true",
                    help="index by area instead of status (multi-area tasks "
                         "listed under each area)")
     s.add_argument("--watch", action="store_true",
                    help="interactive: r refresh, a toggle by-area, "
-                        "q quit, arrows scroll, type id+Enter for area "
-                        "collisions (used by ./board)")
+                        "e toggle expand, q quit, arrows scroll, type "
+                        "id+Enter for area collisions (used by ./board)")
     s.set_defaults(fn=cmd_board)
 
     s = sub.add_parser("iteration", help="show current iteration")

@@ -44,11 +44,11 @@ TASKS list [--assignee <who>] [--status <s>] [--needs decision] [--json]
 TASKS board [--expand] [--by-area] [--watch]
                                         # index: one line per status (or
                                         # area) of task ids; then in-play
-                                        # tasks one per line. collapses
-                                        # umbrella children; done/later/
-                                        # not-planned fold to a count;
-                                        # --expand lists children and those
-                                        # three; --watch: r/a/q, arrows
+                                        # tasks one per line, umbrella
+                                        # children indented under the
+                                        # parent; done/later/not-planned
+                                        # fold to a count, --expand lists
+                                        # those three; --watch: r/a/e/q, arrows
                                         # scroll, type id↵ for area
                                         # collisions (./board)
 TASKS iteration
