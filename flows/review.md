@@ -83,8 +83,9 @@ re-run with the full required set. Exit 0 → continue below.
      branch). Session cwd is already the product on the hub — land
      prints `product: <abs>`; apply those docs there with
      product-relative paths (do not prefix the board scope). A
-     Dev-batch or stack: sized for the whole set
-     (flows/review-batch.md).
+     Dev-batch: sized for the whole set
+     (flows/review-batch.md). A bare stack is not a batch — each
+     member keeps its own intent and its own bump.
      **Always surface the script's full output**: on non-zero exit or any
      early abort (`error: …`), show the message and stop — do not retry
      with hand-rolled git/gh, and do not claim the task landed.

@@ -59,11 +59,27 @@ single id. `/dev auto` stays one task per cycle.
      may have shifted since declaration), surface it; on the user's
      approval, update `--area` before collisions.
    - **Area collision**: `TASKS collisions <id>` (SKILL.md *Area
-     stewardship*). Exit 2 → print the output and **stop** — do not claim.
-     Any assignee's `doing` or `review` in an overlapping area counts,
-     including this user's other work. Resume of the same id is clear
-     (self is excluded). Resume of a `Dev-batch:` member must pass the
-     whole set (resume path below) — a single id false-aborts on
+     stewardship*). **Exit 2 → stop**, do not claim: at least one blocker
+     is `doing` — unreviewed and still moving, the real concurrent-edit
+     case. Print the output. **Exit 3 → review-only**: every blocker is in
+     `review` (any assignee), so that work is reviewed and about to land.
+     Print the output and ask the user to pick one of three:
+     - **Proceed** — this task does not build on the reviewed code. Claim
+       normally; the two PRs merge independently. Usually the right call —
+       an area lock overlaps, the files often do not.
+     - **Stack** — this task needs that unmerged code. `TASKS claim <id>
+       --stack-on <blocker-id>` starts the branch on the blocker's pushed
+       tip; ship derives the PR base from it, so pass nothing at ship.
+       Land merges the parent without rewriting it, so the child is
+       retargeted, never rebased. If the parent is abandoned rather than
+       merged, `TASKS restack --ids <id> --onto origin/<integration>
+       --retarget` drops its commits.
+     - **Wait** — stop; resume once the blocker lands.
+
+     Record stack or proceed with `--append "Decision: …"`. Auto never
+     negotiates: it skips on 2 and 3 alike (flows/auto.md). Resume of the
+     same id is clear (self is excluded). Resume of a `Dev-batch:` member
+     must pass the whole set (resume path below) — a single id false-aborts on
      same-area siblings still in review. An `all` task additionally
      requires an otherwise-quiet board **and** the user's explicit
      confirmation that other contributors are paused; the board can't
@@ -132,7 +148,8 @@ single id. `/dev auto` stays one task per cycle.
    remove`, local branch delete, `git push origin --delete <name>`).
 
 3. **Branch**: already done by `claim`. Confirm the printed `base:` is the
-   origin/integration ref you expect (claim verifies it; do not assume).
+   ref you expect — `origin/<integration>`, or the parent's pushed tip
+   after `--stack-on` (claim verifies it; do not assume).
    Session cwd stays on the hub. Edit, compile, test, and run product
    files from the printed `product` dir (`cd` or the command's
    working-directory flag) — a green result on the hub is integration,
@@ -159,10 +176,13 @@ single id. `/dev auto` stays one task per cycle.
    `TASKS update <id> --area "…"` (add the specific child, not the
    parent) and `Decision:` (files + areas) if this is the first
    approval, then `TASKS collisions <id>` (batch: the whole set).
-   Exit 0 → touch those files. Exit 2 → revert `--area` to the
-   previous set, keep the `Decision:` (`widen to X for <files>;
-   last blocked by T…`), stop — do not touch those files, do not
-   set `needs: decision`. In-area work may continue. Next
+   Exit 0 → touch those files. Exit 3 (review-only) → ask the user
+   proceed or not, as in step 0, but **without** the stack option —
+   this branch already exists and is based on integration; on
+   proceed, touch those files and keep the widen. Exit 2 → revert
+   `--area` to the previous set, keep the `Decision:` (`widen to X
+   for <files>; last blocked by T…`), stop — do not touch those
+   files, do not set `needs: decision`. In-area work may continue. Next
    implement retries that Decision (still blocked → revert if you
    updated, leave the Decision, stop). Widening to `all` still
    needs the quiet-board vouch.
@@ -188,8 +208,9 @@ single id. `/dev auto` stays one task per cycle.
    convention drift. If the diff left the stated areas, route
    through **Leaving the stated areas** above (files already
    written: same path; decline or collisions exit 2 → revert those
-   files and `--area` if updated). Fix what you find. If a deeper review tool exists
-   in this environment, use it.
+   files and `--area` if updated; exit 3 is the user's call as
+   above). Fix what you find. If a deeper review tool exists in this
+   environment, use it.
 
 6. **Ship**: `TASKS ship <id> --shipped "<what actually shipped>"` from the
    printed `product` dir (optional `--message`, `--title`, `--body`,
@@ -214,8 +235,9 @@ single id. `/dev auto` stays one task per cycle.
    step the product uses (agent decides), or `major` (breaking — interactive
    asks the user first; auto flags `needs: decision` instead of shipping).
    The actual bump happens at merge into integration (flows/review.md).
-   A Dev-batch or stack: one bump sized for the whole set after the last
-   member lands (flows/review-batch.md), not one bump per PR.
+   A Dev-batch: one bump sized for the whole set after the last member
+   lands (flows/review-batch.md), not one bump per PR. A bare stack is
+   not a batch — those tasks keep their own intents and their own bumps.
 
 7. Report: what changed, anything risky, the PR link. **If `whoami` is the
    board `integrator`**, end with one line: open a **new session** for
@@ -226,8 +248,10 @@ single id. `/dev auto` stays one task per cycle.
 **Resuming after changes were requested** on the PR: `TASKS diff <id>` first
 (re-orients to the worktree; a review branch with no local checkout
 attaches `origin/<branch>`). Then `TASKS collisions` with the task's
-`Dev-batch:` ids (the single id if none) — exit 2 is outside occupancy,
-stop; batch peers in review must not false-abort. Then the same flow
+`Dev-batch:` ids (the single id if none) — exit 2 is an outside `doing`
+blocker, stop; exit 3 (outside blockers all in `review`) is the user's
+proceed-or-wait call, with no stack option (the branch already exists);
+batch peers in review must not false-abort. Then the same flow
 from step 4 on the existing branch; fix on the branch, `TASKS ship <id>
 --shipped "<what changed since the last ship>"`, then note on the PR
 what changed (`gh pr comment`). The re-ship record covers the fixes,

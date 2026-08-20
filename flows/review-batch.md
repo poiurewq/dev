@@ -86,9 +86,13 @@ For each id in order:
    integration; their branches are untouched, at any stack depth.
    Surface full output; on `error:` stop the land wave (the rest stay
    in `review`).
-2. Version intent: after the **last** member of the set lands, apply **one**
-   bump sized for the whole set (greatest of the stated intents). Do not
-   bump per PR. If the wave stops early, wait — do not bump twice later.
+2. Version intent: for a **Dev-batch**, after the last member of the set
+   lands, apply **one** bump sized for the whole set (greatest of the
+   stated intents) — not one per PR. If the wave stops early, wait — do
+   not bump twice later. A set that is **only** a stack (PR base edges,
+   no shared `Dev-batch:`) is not one change set: those tasks merely
+   share a branch lineage, so each keeps its own intent and gets its own
+   bump as it lands.
 
 ### 3. Report
 

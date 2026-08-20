@@ -43,7 +43,7 @@ TASKS update <id> [--title] [--area] [--status] [--kind umbrella|""]
           [--status later] [--status not-planned --reason "<why>"]
 TASKS delete <id>
 TASKS show <id>
-TASKS collisions <id[,id…]>             # exit 2 if in-flight-blocked
+TASKS collisions <id[,id…]>             # 2 doing-blocked, 3 review-only
 TASKS related "<text>"                  # run before every add
 TASKS list [--assignee <who>] [--status <s>] [--needs decision] [--json]
 TASKS board [--expand] [--by-area] [--watch]
@@ -52,7 +52,7 @@ TASKS iteration-close [--force]
 TASKS iteration-new <branch> [--parent <branch>] [--name <name>]
                     [--iteration N] [--iteration-started YYYY-MM-DD]
 TASKS iteration-land [--create-only] [--title T] [--body B]
-TASKS claim <id> [--assignee <who>] [--branch <b>]
+TASKS claim <id> [--assignee <who>] [--branch <b>] [--stack-on <id>]
                                         # refuse if diverged or untagged
 TASKS diff <id>
 TASKS ship <id> --shipped "<what actually shipped>"
@@ -265,9 +265,15 @@ overlaps `flows/implement` and `flows/other`; `flows/implement` does not
 overlap `flows/review`; `flow` does not overlap `flows` (string prefix is
 the trap). The script owns this (`areas_overlap` /
 `in_flight_area_collisions`); `TASKS collisions <id[,id…]>` and
-watch-mode type-id query it. Collision with any assignee's `doing` or
-`review` — including this user — **aborts** implement (print the output;
-do not claim). Auto skips. Untagged tasks skip that check (empty overlaps
+watch-mode type-id query it. A `doing` blocker — any assignee, this user
+included — **aborts** implement (exit 2; print the output, do not claim).
+Blockers that are **all in `review`** (any assignee) exit 3 instead: that
+work is reviewed and about to land, so interactive implement offers
+**proceed** (claim from integration — the areas overlap but the files
+usually do not), **stack** (`claim --stack-on <blocker-id>`, when the task
+truly needs the unmerged code; ship derives the PR base, land retargets
+rather than rebases) or **wait** (flows/implement.md). Auto skips both
+exits and never stacks. Untagged tasks skip that check (empty overlaps
 nothing except `all`), so `claim` refuses an empty area. Implement
 recommends a reuse or new name and waits; auto files the same as `needs:
 decision` (does not `area set` or tag until a human decides). Add may
@@ -288,7 +294,8 @@ directory exists. Tag the parent **or** the specific children, not both.
 Prefer the children so locks stay narrow; do not tag the parent because
 the work *might* go wide — widen at implement if a fork actually crosses
 them (pause, update `--area`, re-run collisions before touching those
-files; collisions fail → revert `--area`, keep the `Decision:` for resume;
+files; exit 2 → revert `--area`, keep the `Decision:` for resume; exit 3
+is the user's proceed-or-not call, with no stack option mid-branch;
 auto files `needs: decision` instead — flows/implement.md). Residuals
 that are not a named child go to `…/other` (`flows/other`), never the
 parent. A listed path-parent may itself be slash-free (`flows`) and still

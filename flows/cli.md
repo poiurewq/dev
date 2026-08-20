@@ -36,7 +36,10 @@ TASKS delete <id>
 TASKS show <id>
 TASKS collisions <id[,id…]>             # area occupancy vs doing/review;
                                         # multi-id also prints in-set overlap;
-                                        # exit 2 if any id is in-flight-blocked
+                                        # exit 2 if any blocker is doing;
+                                        # exit 3 if every blocker is review
+                                        # (any assignee) — implement offers
+                                        # proceed / stack / wait, auto skips
                                         # (batch peers excluded from that check)
 TASKS related "<text>"                  # existing tasks similar to <text>;
                                         # run before every add
@@ -58,8 +61,11 @@ TASKS iteration-new <branch> [--parent <branch>] [--name <name>]
 TASKS iteration-land [--create-only] [--title T] [--body B]
                                         # open/merge iteration PR into parent
                                         # with merge commit (not squash)
-TASKS claim <id> [--assignee <who>] [--branch <b>]
-                                        # branch from origin/integration
+TASKS claim <id> [--assignee <who>] [--branch <b>] [--stack-on <id>]
+                                        # branch from origin/integration, or
+                                        # from that task's pushed tip with
+                                        # --stack-on (refuses a parent with no
+                                        # branch or already on integration)
                                         # (ff empty leftover; refuse if
                                         # diverged or untagged), always a linked
                                         # worktree under .dev/worktrees
@@ -85,8 +91,12 @@ TASKS ship <id> --shipped "<what actually shipped>"
                                         # task body as Shipped (<date>): … and
                                         # mirrored onto the PR body each ship.
                                         # --version-intent has no default;
-                                        # --base stacks; --batch stamps
-                                        # Dev-batch on PR + task body
+                                        # --base overrides the derived base
+                                        # (a live task branch this one is
+                                        # based on, else integration; refuses
+                                        # if that branch moved since the
+                                        # stack); --batch stamps Dev-batch
+                                        # on PR + task body
 TASKS batch-gate --ids <id,id,…>        # exit 2 if selection omits open
                                         # co-members of a Dev-batch/stack
 TASKS restack --ids <id,id,…> [--after N] [--onto <ref>]

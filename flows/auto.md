@@ -29,9 +29,12 @@ or reset the local integration branch — that is human-only
    report, continue.
 2. **Select**: from `TASKS list --json`, candidates are `backlog` tasks,
    unassigned, no `needs` flag, all deps `done`. Exclude on **area grounds**
-   (`TASKS collisions <id>` / SKILL.md *Area stewardship*): exit 2 → skip,
-   surface the output (any assignee's `doing` or `review`, including this
-   auto identity's other work). Never pass several candidates as one
+   (`TASKS collisions <id>` / SKILL.md *Area stewardship*): exit 2 **or 3**
+   → skip, surface the output (any assignee's `doing` or `review`,
+   including this auto identity's other work). Exit 3 (review-only
+   blockers) offers interactive implement a proceed/stack/wait choice —
+   that is a human call, so auto skips it like any other collision and
+   never stacks. Never pass several candidates as one
    collisions set — that would treat them as batch peers. Never select an
    `all` task (those wait for a human-supervised quiet board). Untagged
    candidates: do not claim and do not invent a placeholder. Recommend a

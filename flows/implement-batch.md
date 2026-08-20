@@ -45,7 +45,11 @@ Run the steps below **before claiming anything**, then run
    per id (implement.md area sanity) and wait — do not collide or claim
    yet. After every member has an area, `TASKS collisions <id,id,…>` with
    the **whole set** (not one id). Exit 2 → refuse the batch and print
-   the output (outside `doing`/`review` occupancy). `set:` overlap lines
+   the output (an outside `doing` blocker). Exit 3 → every outside
+   blocker is in `review`: print the output and ask the user to proceed
+   or wait, as in implement.md step 0 — for the batch as a whole, since
+   the members share the claim decision. No stack option here: stacking
+   is per member, and only step 7 decides it. `set:` overlap lines
    mean members share an area — informational; implement sequentially.
    If any remain untagged, refuse the rest. If any member is `all`, also
    require the quiet-board vouch from implement.md.
@@ -67,16 +71,17 @@ Run the steps below **before claiming anything**, then run
    - **Area collision** for a later member: re-check with
      `TASKS collisions <id,id,…>` for the **whole set**, not the single
      id — in-set `review` after an earlier ship is expected. Exit 2
-     (outside occupancy) → stop; leave already-shipped members in
-     `review` and report the rest.
+     (an outside `doing` blocker) → stop; leave already-shipped members
+     in `review` and report the rest. Exit 3 (outside blockers all in
+     `review`) → the user's proceed-or-wait call, same as step 5.
    - If a later member becomes unstartable mid-batch (board moved), stop;
      leave already-shipped members in `review` and report the rest.
 7. **Out of scope for this path:** parallel worktrees or parallel agents for
    the batch, unless the user later asks. Each task still gets its own branch
    and PR. Prefer `origin/<integration>` as the base; if a later task truly
-   needs unmerged code from an earlier one, stack on that task's branch
-   (`TASKS ship --base <parent-branch> --batch … --shipped …`) and note the
-   dependency in
-   the PR body. Stacking is cheap: `land` merges the parent without
-   rewriting it, so a stacked child is only retargeted, never rebased —
-   at any depth.
+   needs unmerged code from an earlier one, stack on it: `TASKS claim <id>
+   --stack-on <earlier-id>`, then ship as usual — the PR base is derived
+   from the branch it was started on, so `--base` is only for overriding
+   that. Note the dependency in the PR body. Stacking is cheap: `land`
+   merges the parent without rewriting it, so a stacked child is only
+   retargeted, never rebased — at any depth.

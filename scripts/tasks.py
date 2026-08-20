@@ -15,7 +15,9 @@ several product boards share one integration branch, push uses rebase/retry
 (policy A). Code branches never commit to .tasks/.
 
 Stdlib + git for board CRUD. Git/gh lifecycle helpers: `claim` (implement
-setup), `ship` (commit/push/PR; optional Dev-batch stamp), `preflight`,
+setup, optionally stacked on another task's review tip), `ship`
+(commit/push/PR, PR base derived for a stack; optional Dev-batch stamp),
+`preflight`,
 `restack` (fail-closed stack rebase), `batch-gate` (review-set completeness),
 `land` / `cleanup`, `iteration-land`. Never auto-approve reviews.
 """
@@ -2146,12 +2148,45 @@ def identity_or_exit(root, scope):
     return ident
 
 
+def resolve_stack_start(root, bw, scope, tid, parent_id, integration):
+    """Start ref for `claim --stack-on`: another task's pushed review tip.
+
+    Offered when `collisions` exits 3 and the new task genuinely builds on
+    that unmerged code (flows/implement.md); when it does not, claim
+    normally and let the two PRs merge independently. The ref is
+    origin/<parent branch> — the same tip GitHub will use as the child
+    PR's base, so the child's diff is exactly its own commits. Refuses a
+    parent with no branch, or one already on integration (nothing left to
+    stack on). Initial claim only: resume claims without --stack-on, since
+    origin/<integration> is a valid base once the child is ahead of it.
+    """
+    if parent_id == tid:
+        sys.exit(f"error: --stack-on T{tid} is the task itself")
+    parent = find_task(bw, scope, parent_id)
+    pbranch = task_branch_name(parent)
+    if not pbranch:
+        sys.exit(f"error: T{parent_id} has no branch; nothing to stack on")
+    git("fetch", "origin",
+        f"+refs/heads/{pbranch}:refs/remotes/origin/{pbranch}",
+        cwd=root, check=False)
+    remote = f"origin/{pbranch}"
+    if not ref_exists(root, remote):
+        sys.exit(f"error: T{parent_id} branch '{pbranch}' is not on origin; "
+                 f"nothing to stack on (has it shipped?)")
+    if is_ancestor(root, remote, f"origin/{integration}"):
+        sys.exit(f"error: T{parent_id} ('{pbranch}') is already on "
+                 f"{integration}; claim without --stack-on")
+    print(f"note: stacking on T{parent_id} ({parent['status']}, {pbranch})")
+    return remote
+
+
 def cmd_claim(args):
     """Implement claim/setup: branch from origin/integration, always a
     linked worktree under .dev/worktrees (primary stays on integration as
     hub), record branch + doing + assignee. Resume reuses a branch that is
     at or ahead of origin/integration; empty leftovers are fast-forwarded;
-    diverged leftovers error. Printed base is verified.
+    diverged leftovers error. Printed base is verified. --stack-on <id>
+    starts on another task's review tip instead (resolve_stack_start).
     """
     root, scope, integration, bw = ctx()
     meta = find_task(bw, scope, args.id)
@@ -2190,6 +2225,9 @@ def cmd_claim(args):
     start = f"origin/{integration}"
     if not ref_exists(root, start):
         sys.exit(f"error: {start} missing after fetch")
+    if args.stack_on is not None:
+        start = resolve_stack_start(
+            root, bw, scope, tid, args.stack_on, integration)
 
     ensure_task_branch(root, branch, start)
     ready = resolve_task_ready_path(
@@ -2247,8 +2285,23 @@ def path_under_task_worktrees(root, scope, path):
         return False
 
 
-def find_open_pr_for_branch(root, branch, base):
-    """Return PR url for an open PR with this head branch and base, or ''."""
+def find_open_pr_for_branch(root, branch, base=""):
+    """Return PR url for an open PR with this head branch, or ''.
+
+    A falsy ``base`` matches any base — the caller has not fixed one yet,
+    and land retargets a stacked PR's base anyway, so the head branch is
+    the stable identity.
+    """
+    if not base:
+        r = gh("pr", "list", "--head", branch, "--state", "open",
+               "--json", "url", "--limit", "5", cwd=root, check=False)
+        if r.returncode != 0:
+            return ""
+        try:
+            items = json.loads(r.stdout or "[]")
+        except json.JSONDecodeError:
+            return ""
+        return (items[0].get("url") or "").strip() if items else ""
     r = gh("pr", "list", "--head", branch, "--base", base, "--state", "open",
            "--json", "url,number", "--limit", "5", cwd=root, check=False)
     if r.returncode != 0:
@@ -2819,6 +2872,72 @@ def cmd_restack(args):
     print("restack: done")
 
 
+def derive_stack_base(root, bw, scope, meta, branch, integration):
+    """PR base for a stacked task branch, or '' when it stands alone.
+
+    A collision-driven stack stores nothing: the stack edge is the PR
+    base, and before the PR exists git already knows it. Another live task
+    branch is this branch's stack parent when its tip is an ancestor of
+    this branch but has not reached origin/<integration> — those commits
+    can only be here because this branch started on that one. The test is
+    directional on purpose: merge-base alone is symmetric and would make a
+    parent adopt its own child as base. Once the parent lands, its commits
+    become ancestors of integration, the test goes false on its own, and
+    ship bases on integration — that is the whole destack-at-ship step,
+    with no marker to keep in sync. Deepest match wins, so a three-deep
+    stack bases on its direct parent.
+
+    A branch that shares unmerged commits with neither tip based on the
+    other (one of them moved after the fork) is ambiguous — git cannot
+    tell which side moved, and the error must not blame one — so ship
+    refuses and asks for an explicit --base rather than opening a PR
+    whose diff silently contains someone else's commits.
+    """
+    remote_int = f"origin/{integration}"
+    if not ref_exists(root, remote_int):
+        return ""
+    parents, murky = [], []
+    for other in all_tasks(bw, scope):
+        if other["id"] == meta["id"]:
+            continue
+        if other.get("status") not in IN_FLIGHT:
+            continue
+        obranch = task_branch_name(other)
+        if not obranch or obranch == branch:
+            continue
+        # A stale origin/<obranch> is still correct here: it holds the
+        # shared commits, and a landed parent is caught via integration.
+        ref = f"origin/{obranch}"
+        if not ref_exists(root, ref):
+            ref = f"refs/heads/{obranch}"
+            if not ref_exists(root, ref):
+                continue
+        if is_ancestor(root, ref, remote_int):
+            continue  # landed, or never left integration
+        if is_ancestor(root, ref, branch):
+            depth = commits_ahead(root, ref, remote_int) or 0
+            parents.append((depth, obranch))
+            continue
+        if is_ancestor(root, branch, ref):
+            continue  # a descendant of this branch, not its parent
+        r = git("merge-base", ref, branch, cwd=root, check=False)
+        mb = (r.stdout or "").strip() if r.returncode == 0 else ""
+        if mb and not is_ancestor(root, mb, remote_int):
+            murky.append(obranch)
+    if murky:
+        names = ", ".join(sorted(murky))
+        sys.exit(f"error: '{branch}' shares unmerged commits with {names}, "
+                 f"but neither branch is based on the other's current tip "
+                 f"(one of them moved since the stack); cannot derive a PR "
+                 f"base — pass --base <branch> explicitly")
+    if not parents:
+        return ""
+    parents.sort()
+    best = parents[-1][1]
+    print(f"  stack base: {best} (this branch is based on it)")
+    return best
+
+
 def cmd_ship(args):
     """Ship end of implement: commit if needed, push, open PR, mark review.
 
@@ -2884,8 +3003,12 @@ def cmd_ship(args):
             sys.exit(f"error: commit failed in {work}:\n{err}")
         print(f"  committed: {msg}")
 
-    # PR base defaults to integration; --base stacks on another task branch.
-    pr_base = (args.base or "").strip() or integration
+    # PR base is only needed to CREATE a PR: explicit --base wins, else it
+    # is derived below once we know there is no open PR on this head. A
+    # re-ship must not depend on the derivation — the base is already set
+    # on the open PR (and land may have retargeted it).
+    git("fetch", "origin", integration, cwd=root, check=False)
+    pr_base = (args.base or "").strip()
 
     batch_ids = parse_id_list(getattr(args, "batch", None) or "")
     if batch_ids and tid not in batch_ids:
@@ -2905,16 +3028,20 @@ def cmd_ship(args):
     else:
         pr_url = find_open_pr_for_branch(root, branch, pr_base)
 
-    git("fetch", "origin", integration, cwd=root, check=False)
     if not pr_url:
-        # Nothing to open: clean tree and no commits ahead of integration.
-        ahead = commits_ahead(root, branch, f"origin/{integration}")
+        if not pr_base:
+            pr_base = derive_stack_base(
+                root, bw, scope, meta, branch, integration) or integration
+        # Nothing to open: clean tree and no commits of its own ahead of the
+        # PR base. Measured against pr_base, not integration — a stacked
+        # child is ahead of integration by its parent's commits alone.
+        ahead = commits_ahead(root, branch, f"origin/{pr_base}")
         if ahead is None:
-            # Branch may lack remote tracking yet; try local integration.
-            ahead = commits_ahead(root, branch, integration)
+            # Branch may lack remote tracking yet; try the local ref.
+            ahead = commits_ahead(root, branch, pr_base)
         if ahead is None or ahead == 0:
             sys.exit(f"error: nothing to ship on '{branch}' (clean worktree, "
-                     f"no commits ahead of origin/{integration}, no open PR)")
+                     f"no commits ahead of {pr_base}, no open PR)")
 
     # One push (same helper as land). Explicit refspec; no -u (skill ship is
     # plain "push"; park-as-PR is the only flow that documents git push -u).
@@ -3648,11 +3775,17 @@ def cmd_list(args):
 
 
 def cmd_collisions(args):
-    """Area occupancy vs doing/review. Exit 2 if any id is blocked.
+    """Area occupancy vs doing/review. Exit 2 blocked, 3 review-only.
 
     One id matches watch-mode. Several ids: each vs in-flight *outside*
     the set (batch peers are sequential); then ``set:`` lines for
     in-set area overlap (informational, does not fail).
+
+    Exit 3 when every blocker is in ``review`` (any assignee): the work
+    is reviewed and about to land, so implement offers proceed / stack /
+    wait rather than aborting (flows/implement.md). A single ``doing``
+    blocker is unreviewed and still moving — that stays exit 2, and auto
+    skips both.
     """
     root, scope, branch, bw = ctx()
     tasks = all_tasks(bw, scope)
@@ -3665,18 +3798,27 @@ def cmd_collisions(args):
         sys.exit("error: no task with id " +
                  ",".join(str(i) for i in missing))
     exclude = ids if len(ids) > 1 else None
-    blocked = False
+    blockers = {}
     for tid in ids:
         task = by_id[tid]
         hits = in_flight_area_collisions(task, tasks, exclude_ids=exclude)
         print(format_area_collisions(task, hits))
-        if hits:
-            blocked = True
+        for o in hits:
+            blockers.setdefault(o["id"], o)
     if len(ids) > 1:
         for a, b in set_area_overlaps(ids, tasks):
             print(f"set: T{a['id']} overlaps T{b['id']}")
-    if blocked:
-        sys.exit(2)
+    if not blockers:
+        return
+    all_hits = [blockers[i] for i in sorted(blockers)]
+    if all(o.get("status") == "review" for o in all_hits):
+        bits = ", ".join(
+            f"T{o['id']} ({o.get('assignee') or 'unassigned'})"
+            for o in all_hits)
+        print(f"review-only: {bits} — proceed, stack, or wait "
+              f"(flows/implement.md)")
+        sys.exit(3)
+    sys.exit(2)
 
 
 # 16-color SGR. Paint-time only — never write these into TASKS.md.
@@ -4695,6 +4837,11 @@ def main():
                    help="assignee (default: product identity; auto agents pass auto/<model>)")
     s.add_argument("--branch",
                    help="task branch (default: recorded or dev/<scope?>-<id>-<slug>)")
+    s.add_argument("--stack-on", type=int, metavar="ID",
+                   help="start on task ID's pushed review tip instead of "
+                        "origin/<integration> (collisions exit 3, when this "
+                        "task builds on that unmerged code); ship then bases "
+                        "the PR on that branch")
     s.set_defaults(fn=cmd_claim)
 
     s = sub.add_parser("diff",
@@ -4718,8 +4865,9 @@ def main():
                         "that line (agent only; no default — omit when product does "
                         "not version)")
     s.add_argument("--base",
-                   help="PR base on create only (default: integration; stack with "
-                        "another task branch name)")
+                   help="PR base on create only (default: derived — the "
+                        "live task branch this one was started on, else "
+                        "integration; pass a branch name to override)")
     s.add_argument("--batch",
                    help="implement-batch stamp: comma-separated task ids "
                         "(writes Dev-batch: … on PR body + task body)")
